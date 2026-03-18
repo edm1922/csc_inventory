@@ -298,6 +298,16 @@ class InventoryManager(QWidget):
                 
                 if item_id:
                     item = session.query(Item).get(item_id)
+                    # CHECK FOR NAME CONFLICT with ANOTHER ID
+                    duplicate = session.query(Item).filter(
+                        func.upper(Item.name) == data["name"].upper(),
+                        Item.id != item_id
+                    ).first()
+                    if duplicate:
+                        QMessageBox.warning(self, "Name Conflict", 
+                                           f"The name '{data['name']}' is already used by another item (ID: {duplicate.id}).\n\n"
+                                           "Please use a unique name.")
+                        return
                     loc_id = data["location_id"]
                 else:
                     # IMPROVED: Check if name already exists globally
