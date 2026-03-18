@@ -3,10 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Databases
-*.db
-*.sqlite3
-
 # Excel Reports and Temporary Files
 *.xlsx
 *.json
