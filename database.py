@@ -39,7 +39,7 @@ class Department(Base):
 class Item(Base):
     __tablename__ = "items"
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, nullable=False)
+    name = Column(String, nullable=False)
     description = Column(String, nullable=True)
     unit = Column(String, nullable=True)
     price = Column(Float, default=0.0)
@@ -52,7 +52,7 @@ class Item(Base):
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
     supplier = relationship("Supplier", back_populates="items")
 
-    request_items = relationship("RequestItem", back_populates="item")
+    request_items = relationship("RequestItem", back_populates="item", cascade="all, delete-orphan")
     stocks = relationship("Stock", back_populates="item", cascade="all, delete-orphan")
 
 class Stock(Base):
@@ -117,6 +117,34 @@ class RequestItem(Base):
         if value is None or value <= 0:
             raise ValueError("Quantity must be greater than zero.")
         return value
+
+class PurchaseRequest(Base):
+    __tablename__ = "purchase_requests"
+    id = Column(Integer, primary_key=True, index=True)
+    pr_no = Column(String, unique=True, nullable=False)
+    request_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    department = Column(String, nullable=False)
+    end_user = Column(String, nullable=True)
+    position = Column(String, nullable=True)
+    prepared_by = Column(String, nullable=True)
+    approved_by = Column(String, nullable=True)
+    status = Column(String, default="PENDING")
+
+    items = relationship("PurchaseItem", back_populates="purchase_request", cascade="all, delete-orphan")
+
+class PurchaseItem(Base):
+    __tablename__ = "purchase_items"
+    id = Column(Integer, primary_key=True, index=True)
+    pr_id = Column(Integer, ForeignKey("purchase_requests.id"), nullable=False)
+    description = Column(String, nullable=False)
+    purpose = Column(String, nullable=True)
+    for_dept = Column(String, nullable=True)
+    price = Column(Float, default=0.0)
+    qty = Column(Float, default=0.0)
+    unit = Column(String, nullable=True)
+    total = Column(Float, default=0.0)
+
+    purchase_request = relationship("PurchaseRequest", back_populates="items")
 
 def parse_frequency(freq_str):
     """Converts frequency strings like '1 WEEK' or '1 MONTH' into a timedelta."""
@@ -193,6 +221,35 @@ def init_db():
             cursor.execute("UPDATE supply_requests SET status = 'OK' WHERE status = 'PENDING'")
         except sqlite3.OperationalError: pass
  
+        # Create Purchase Request Tables
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS purchase_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pr_no TEXT UNIQUE NOT NULL,
+                request_date DATETIME,
+                department TEXT,
+                end_user TEXT,
+                position TEXT,
+                prepared_by TEXT,
+                approved_by TEXT,
+                status TEXT DEFAULT 'PENDING'
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS purchase_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pr_id INTEGER NOT NULL,
+                description TEXT,
+                purpose TEXT,
+                for_dept TEXT,
+                price REAL DEFAULT 0.0,
+                qty REAL DEFAULT 0.0,
+                unit TEXT,
+                total REAL DEFAULT 0.0,
+                FOREIGN KEY(pr_id) REFERENCES purchase_requests(id)
+            )
+        """)
+
         # Migration: Move Item.actual_stock to Stock table (defaulting to MAIN OFFICE)
         cursor.execute("SELECT id FROM locations WHERE name = 'MAIN OFFICE'")
         row = cursor.fetchone()

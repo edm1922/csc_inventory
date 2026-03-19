@@ -7,6 +7,7 @@ from PyQt6.QtGui import QIcon, QFont, QColor
 # Import the existing modules
 from request_main import RequestTrackingApp
 from inventory_main import InventoryManager
+from purchase_main import PurchaseManager
 from database import init_db
 
 class MainMenu(QWidget):
@@ -59,6 +60,15 @@ class MainMenu(QWidget):
         )
         self.inventory_btn.clicked.connect(lambda: self.parent_window.switch_view(3))
         btn_layout.addWidget(self.inventory_btn)
+        
+        # Purchase Request Button
+        self.purchase_btn = self.create_menu_button(
+            "🛒", "Purchase Request", 
+            "Create and print formal Purchase Request forms.",
+            "#e67e22"
+        )
+        self.purchase_btn.clicked.connect(lambda: self.parent_window.switch_view(4))
+        btn_layout.addWidget(self.purchase_btn)
         
         self.layout.addLayout(btn_layout)
         
@@ -133,6 +143,10 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.main_request_view)  # 2
         self.stack.addWidget(self.inventory_view)     # 3
         
+        self.purchase_view = PurchaseManager()
+        self.add_nav_bar(self.purchase_view)
+        self.stack.addWidget(self.purchase_view)      # 4
+        
         self.stack.setCurrentIndex(0)
 
     def add_nav_bar(self, widget):
@@ -167,6 +181,8 @@ class MainWindow(QMainWindow):
             self.main_request_view.refresh_table()
         elif index == 3:
             self.inventory_view.load_data()
+        elif index == 4:
+            self.purchase_view.load_data()
 
 if __name__ == "__main__":
     init_db()

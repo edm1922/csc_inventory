@@ -1,0 +1,60 @@
+--- Column Widths ---
+Col A: 10.109375
+Col B: 1.21875
+Col D: 3.33203125
+Col E: 6.0
+Col I: 1.5546875
+Col J: 1.88671875
+Col Q: 1.6640625
+Col V: 5.21875
+Col W: 0.6640625
+Col X: 5.0
+Col Y: 9.5546875
+Col Z: 1.6640625
+Col AA: 4.33203125
+Col AB: 1.21875
+Col AC: 7.21875
+Col AD: 11.21875
+Col AE: 1.33203125
+
+--- Cell Values (Rows 1-40) ---
+R 1: C E N T R O  S E R V I C E S  C O O P E R A T I V E | . | . | . | . | . | . | . | . | . | . | . | . | .
+R 2: P U R C H A S E   R E Q U E S T   F O R M  | . | . | . | . | . | . | . | . | . | . | . | . | .
+R 3:  Date: | . | . | . | 2026-02-03 00:00:00 | . | . | . | . | . | . | . | . | .
+R 4:  Department: | . | . | . | OFFICE | . | . | . | . | . | . | . | . | .
+R 5:  End-User / Person Who Will Use the Item: | . | . | . | . | . | . | . | . | . | . | . | . | OFFICE
+R 6:  Position: | . | . | . | . | . | . | . | . | . | . | . | . | .
+R 7: I T E M   D E T A I L S | . | . | . | . | . | . | . | . | . | . | . | . | .
+R 8: Item Description | . | . | . | . | . | . | . | . | . | Purpose / Reason | . | . | .
+R 9: EPSON 003 INK- BLACK | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R10: EPSON 664 INK- BLACK | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R11: EPSON 664 INK- CYAN | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R12: EPSON 664 INK- MAGENTA | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R13: EPSON 664 INK- YELLOW | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R14: BTD100 PRINTER INK- BLACK | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R15: BTD100 PRINTER INK- YELLOW | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R16: BTD100 PRINTER INK- CYAN | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R17: BTD100 PRINTER INK- YELLOW | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R18: GLUE- 500ML | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R19: STICKER PAPER | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R20: PHOTO PAPER | . | . | . | . | . | . | . | . | . | MAIN OFFICE STOCKS | . | . | .
+R21: Estimated Total: | . | . | . | . | Php. | . | 8970 | . | . | . | . | . | .
+R22: . | . | . | . | . | . | . | . | . | . | . | . | . | .
+R23: Requested By: | . | . | . | . | . | . | . | . | . | Prepared By: | . | . | .
+R24: . | . | . | . | . | . | . | . | . | . | . | . | . | .
+R25: . | . | . | . | . | . | . | . | . | . | . | . | . | .
+R26: . | . | . | . | . | . | . | . | . | . | . | . | JOSIE EVE H. SIRAD | .
+R27: Name & Signature | . | . | . | . | . | . | . | . | . | Name & Signature | . | . | .
+R28: . | . | . | . | . | . | . | . | . | . | . | . | . | .
+R29: C e n t r o   S e r v I c e s   C o o p e r a t I v e | . | . | . | . | . | . | . | . | . | . | . | . | .
+R30: P U R C H A S E   R E Q U E S T   F O R M  | . | . | . | . | . | . | . | . | . | . | . | . | .
+R31:  Date: | . | . | . | 00:00:00 | . | . | . | . | . | . | . | . | .
+R32:  Department: | . | . | . | #REF! | . | . | . | . | . | . | . | . | .
+R33:  End-User / Person Who Will Use the Item: | . | . | . | . | . | . | . | . | . | . | . | . | .
+R34:  Position: | . | . | . | . | . | . | . | . | . | . | . | . | .
+R35: I T E M   D E T A I L S | . | . | . | . | . | . | . | . | . | . | . | . | .
+R36: Qty | . | Unit | . | . | Item Description | . | . | . | . | . | . | . | .
+R37: #REF! | . | #REF! | . | . | #REF! | . | . | . | . | . | . | . | .
+R38: 0 | . | . | . | . | . | . | . | . | . | . | . | . | .
+R39: 0 | . | . | . | . | . | . | . | . | . | . | . | . | .
+R40: 0 | . | . | . | . | . | . | . | . | . | . | . | . | .

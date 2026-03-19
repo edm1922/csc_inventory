@@ -1,7 +1,7 @@
 import sys
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
                              QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, 
-                             QHeaderView, QGroupBox, QFormLayout, QDialog, QComboBox)
+                             QHeaderView, QGroupBox, QFormLayout, QDialog, QComboBox, QAbstractItemView)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDoubleValidator
 
@@ -195,6 +195,8 @@ class InventoryManager(QWidget):
             "Standard", "Actual", "Location", "ID"
         ])
         self.table.setColumnHidden(7, True) # ID column
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.cellDoubleClicked.connect(self.edit_item)
         self.main_layout.addWidget(self.table)
         
@@ -298,20 +300,24 @@ class InventoryManager(QWidget):
                 
                 if item_id:
                     item = session.query(Item).get(item_id)
-                    # CHECK FOR NAME CONFLICT with ANOTHER ID
+                    # CHECK FOR NAME CONFLICT with ANOTHER ID (matching both name and description)
                     duplicate = session.query(Item).filter(
                         func.upper(Item.name) == data["name"].upper(),
+                        func.upper(Item.description) == data["description"].upper(),
                         Item.id != item_id
                     ).first()
                     if duplicate:
-                        QMessageBox.warning(self, "Name Conflict", 
-                                           f"The name '{data['name']}' is already used by another item (ID: {duplicate.id}).\n\n"
-                                           "Please use a unique name.")
+                        QMessageBox.warning(self, "Item Conflict", 
+                                           f"An item with the name '{data['name']}' and the same description already exists (ID: {duplicate.id}).\n\n"
+                                           "Please ensure either the name or description is unique.")
                         return
                     loc_id = data["location_id"]
                 else:
-                    # IMPROVED: Check if name already exists globally
-                    item = session.query(Item).filter(func.upper(Item.name) == data["name"].upper()).first()
+                    # IMPROVED: Check if an item with BOTH the same name and description already exists
+                    item = session.query(Item).filter(
+                        func.upper(Item.name) == data["name"].upper(),
+                        func.upper(Item.description) == data["description"].upper()
+                    ).first()
                     loc_id = data["location_id"]
                     
                     if item:
@@ -319,7 +325,7 @@ class InventoryManager(QWidget):
                         existing_stock = session.query(Stock).filter_by(item_id=item.id, location_id=loc_id).first()
                         if existing_stock:
                             QMessageBox.warning(self, "Item Already Exists", 
-                                               f"'{data['name']}' already has a record for this location.\n\n"
+                                               f"'{data['name']}' with this description already has a record for this location.\n\n"
                                                "Please find and edit the existing entry in the table.")
                             return
                         # If no stock for this location, we proceed using the existing item object
@@ -358,29 +364,38 @@ class InventoryManager(QWidget):
                 QMessageBox.critical(self, "Error", f"Failed to save item: {str(e)}")
 
     def delete_selected_item(self):
-        row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.warning(self, "No Selection", "Please select an item to delete.")
+        selected_rows = self.table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Please select at least one item to delete.")
             return
         
-        item_id = int(self.table.item(row, 7).text())
-        item_name = self.table.item(row, 0).text()
+        num_items = len(selected_rows)
+        item_names = [self.table.item(row.row(), 0).text() for row in selected_rows]
         
+        if num_items == 1:
+            msg = f"Are you sure you want to delete '{item_names[0]}'?"
+        else:
+            msg = f"Are you sure you want to delete these {num_items} items?"
+            
         reply = QMessageBox.question(self, "Confirm Delete", 
-                                   f"Are you sure you want to delete '{item_name}'?\nThis will also remove all its request history.",
+                                   f"{msg}\n\nThis will permanently remove all linked records (Stock, Request History).",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if reply == QMessageBox.StandardButton.Yes:
             with SessionLocal() as session:
                 try:
-                    item = session.query(Item).get(item_id)
-                    session.delete(item)
+                    for row_proxy in selected_rows:
+                        item_id = int(self.table.item(row_proxy.row(), 7).text())
+                        item = session.query(Item).get(item_id)
+                        if item:
+                            session.delete(item)
+                    
                     session.commit()
                     self.load_data()
-                    QMessageBox.information(self, "Deleted", "Item removed successfully.")
+                    QMessageBox.information(self, "Deleted", f"Successfully removed {num_items} items.")
                 except Exception as e:
                     session.rollback()
-                    QMessageBox.critical(self, "Error", f"Failed to delete item: {str(e)}")
+                    QMessageBox.critical(self, "Error", f"Failed to delete items: {str(e)}")
 
     def print_checklist(self):
         """Generates an Excel checklist of the currently VISIBLE items in the table."""

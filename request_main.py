@@ -210,7 +210,9 @@ class EmployeeDetailsDialog(QDialog):
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setColumnHidden(7, True)
+        self.table.setColumnHidden(7, True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems) # Select cells, not just rows
+        self.table.setEditTriggers(QTableWidget.EditTrigger.AllEditTriggers)
         self.table.itemChanged.connect(self.save_cell_edit)
         layout.addWidget(self.table)
         
@@ -276,7 +278,8 @@ class EmployeeDetailsDialog(QDialog):
                 pass
             
             # Master Item Check: Does it have ANY database record in the Warehouse?
-            # (Note: we already have warehouse_stocks from pre-fetching at line 269)
+            all_master_items = session.query(Item.name).order_by(Item.name).all()
+            all_item_names = [i[0] for i in all_master_items]
 
             if requests:
                 # Calculate tracking metrics
@@ -314,10 +317,40 @@ class EmployeeDetailsDialog(QDialog):
                 self.table.setItem(row_idx, 1, QTableWidgetItem(area_name))
                 self.table.setItem(row_idx, 2, QTableWidgetItem(shift_val))
                 
-                item_cell = QTableWidgetItem(req.item.name)
-                if bg_color:
-                    item_cell.setBackground(QBrush(bg_color))
-                self.table.setItem(row_idx, 3, item_cell)
+                item_name_text = req.item.name
+                if bg_color and bg_color.name() == "#ffcdd2": # Light Red
+                    # CREATE SUGGESTION DROPDOWN
+                    combo = QComboBox()
+                    # Pre-fill suggestions
+                    combo.addItems(all_item_names)
+                    
+                    # Add current invalid name as first reminder if not present
+                    if item_name_text not in all_item_names:
+                        combo.insertItem(0, f"🔍 FIX: {item_name_text}")
+                        combo.setCurrentIndex(0)
+                    else:
+                        combo.setCurrentText(item_name_text)
+
+                    combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                    combo.setEnabled(True)
+                    
+                    # Style to match table cell
+                    combo.setStyleSheet("""
+                        QComboBox { background-color: #ffcdd2; color: #b71c1c; border: 1px solid #ef9a9a; border-radius: 4px; padding: 2px; }
+                        QComboBox::drop-down { border: none; }
+                        QComboBox QAbstractItemView { selection-background-color: #ef9a9a; selection-color: black; }
+                    """)
+                    
+                    req_id = req.id 
+                    # Use activated(int) or textActivated(str)
+                    combo.textActivated.connect(lambda name, rid=req_id, c=combo: self.resolve_item_mismatch(rid, c, name))
+                    
+                    self.table.setCellWidget(row_idx, 3, combo)
+                else:
+                    item_cell = QTableWidgetItem(item_name_text)
+                    if bg_color:
+                        item_cell.setBackground(QBrush(bg_color))
+                    self.table.setItem(row_idx, 3, item_cell)
                 self.table.setItem(row_idx, 4, QTableWidgetItem(str(req.quantity)))
                 self.table.setItem(row_idx, 5, QTableWidgetItem("Yes" if req.is_refill_request else "No"))
                 self.table.setItem(row_idx, 6, QTableWidgetItem(req.frequency or ""))
@@ -330,6 +363,33 @@ class EmployeeDetailsDialog(QDialog):
                     if it: it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
         self.table.blockSignals(False)
+
+    def resolve_item_mismatch(self, request_item_id, combo_box, selected_name=None):
+        """Updates the RequestItem's linked item when a suggestion is picked."""
+        if selected_name is None:
+            selected_name = combo_box.currentText()
+            
+        selected_name = selected_name.strip()
+        if "🔍 NOT FOUND" in selected_name: return # Still not found
+        
+        with SessionLocal() as session:
+            try:
+                # 1. Fetch the chosen item from master list
+                item_obj = session.query(Item).filter(func.upper(Item.name) == selected_name.upper()).first()
+                if not item_obj: return
+                
+                # 2. Update the RequestItem link
+                req_item = session.query(RequestItem).get(request_item_id)
+                if req_item:
+                    req_item.item_id = item_obj.id
+                    session.commit()
+                    # Refresh to show new status (likely green/orange)
+                    self.load_data()
+                    if self.parent():
+                        self.parent().refresh_table()
+            except Exception as e:
+                session.rollback()
+                QMessageBox.critical(self, "Error", f"Failed to match item: {str(e)}")
 
     def confirm_selected_delivery(self):
         """Hidden feature being removed as column is gone."""
