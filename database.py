@@ -33,6 +33,7 @@ class Department(Base):
     area_name = Column(String, nullable=False)
     shift = Column(String, nullable=True)
     supervisor = Column(String, nullable=True)
+    role = Column(String, nullable=True)
 
     requests = relationship("SupplyRequest", back_populates="department")
 
@@ -40,7 +41,7 @@ class Item(Base):
     __tablename__ = "items"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    description = Column(String, nullable=True)
+    description = Column(String, default="", nullable=False)
     unit = Column(String, nullable=True)
     price = Column(Float, default=0.0)
     standard_stock = Column(Float, default=0.0)
@@ -167,6 +168,49 @@ def parse_frequency(freq_str):
         return timedelta(days=num * 365)
     return None
 
+def normalize_frequency(text):
+    """Normalize frequency strings according to strict user rules."""
+    if not text:
+        return ""
+    
+    s = text.upper().strip()
+    
+    # 1. N/A -> blank
+    if s == "N/A":
+        return ""
+        
+    # 2. Correct UNTIL IT'S DEFECTIVE -> UNTIL DEFECTIVE
+    if ("UNTIL" in s and "DEFECTIVE" in s) or (s == "UNTIL IT'S DEFECTIVE"):
+        return "UNTIL DEFECTIVE"
+    
+    # 3. Remove "EVERY"
+    if s.startswith("EVERY "):
+        s = s[6:].strip()
+        
+    # 4. Handle "ONCE A WEEK", "TWICE A MONTH", etc.
+    if ("ONCE" in s or "TWICE" in s or "THRICE" in s) and (" A " in s):
+        return s
+
+    # 5. Handle time-based units strictly
+    import re
+    # Look for a number and a unit (DAY, WEEK, MONTH, YEAR)
+    time_pattern = r'(\d+)?\s*(DAY|WEEK|MONTH|YEAR)S?'
+    match = re.search(time_pattern, s)
+    
+    if match:
+        num = match.group(1)
+        unit = match.group(2)
+        if num:
+            n = int(num)
+            return f"{n} {unit}S" if n > 1 else f"{n} {unit}"
+        else:
+            # Just "WEEKS" or "WEEK" (Handle plurality loosely)
+            if "S" in s:
+                 return f"{unit}S"
+            return unit
+
+    return s
+
 def init_db():
     """Create tables if they don't exist and handle migrations for existing columns"""
     Base.metadata.create_all(bind=engine)
@@ -178,7 +222,7 @@ def init_db():
     
     # Columns to add if they don't exist
     new_cols = [
-        ("description", "TEXT"),
+        ("description", "TEXT DEFAULT ''"),
         ("unit", "TEXT"),
         ("price", "REAL DEFAULT 0.0"),
         ("standard_stock", "REAL DEFAULT 0.0"),

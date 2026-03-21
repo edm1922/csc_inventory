@@ -9,7 +9,7 @@ from PyQt6.QtGui import QIntValidator, QDoubleValidator, QColor, QBrush
 
 # Import backend logic
 from database import (SessionLocal, Employee, SupplyRequest, Item, Department, 
-                      RequestItem, Stock, Location, parse_frequency)
+                      RequestItem, Stock, Location, parse_frequency, normalize_frequency)
 from exporter import export_to_excel
 from form_generator import generate_blank_form, generate_populated_report, generate_consumption_report
 from sqlalchemy.orm import joinedload
@@ -31,7 +31,8 @@ class EditRequestItemDialog(QDialog):
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
         
-        self.name_input = QLineEdit()
+        self.name_input = QComboBox()
+        self.name_input.setEditable(True)
         self.role_input = QLineEdit()
         self.area_input = QLineEdit()
         self.shift_input = QLineEdit()
@@ -45,7 +46,7 @@ class EditRequestItemDialog(QDialog):
         self.is_refill_cb = QCheckBox("Is this a refill?")
         self.frequency_input = QComboBox()
         self.frequency_input.setEditable(True)
-        self.frequency_input.addItems(["1 WEEK", "2 WEEKS", "1 MONTH", "UNTIL DEFECTIVE", "REFILL"])
+        self.frequency_input.addItems(["1 WEEK", "2 WEEKS", "ONCE A WEEK", "TWICE A WEEK", "1 MONTH", "ONCE A MONTH", "UNTIL DEFECTIVE", "REFILL"])
         
         self.source_loc_input = QComboBox()
         self.dest_loc_input = QComboBox()
@@ -91,27 +92,56 @@ class EditRequestItemDialog(QDialog):
 
     def load_dropdown_data(self):
         with SessionLocal() as session:
-            items = session.query(Item.name).order_by(Item.name).all()
-            self.item_name_input.addItems([i[0] for i in items])
+            # Fetch both name and description
+            items = session.query(Item.name, Item.description).order_by(Item.name).all()
+            for name, desc in items:
+                display = f"{name} ({desc})" if desc else name
+                self.item_name_input.addItem(display, {"name": name, "description": desc or ""})
             
             locations = session.query(Location).all()
             for loc in locations:
                 self.source_loc_input.addItem(loc.name, loc.id)
                 self.dest_loc_input.addItem(loc.name, loc.id)
+                
+            # Load employee names for autofill
+            employees = session.query(Employee.name).order_by(Employee.name).all()
+            self.name_input.addItems([e[0] for e in employees])
+            self.name_input.setCurrentText("") # Start empty
+            self.name_input.currentTextChanged.connect(self.autofill_employee_details)
             
             # Prepopulate area if adding for specific employee
             if self.employee_id and not self.request_item_id:
                 emp = session.query(Employee).get(self.employee_id)
                 if emp:
-                    self.name_input.setText(emp.name)
-                    self.role_input.setText(emp.role or "")
+                    self.name_input.setCurrentText(emp.name)
                 
-                last_req = session.query(SupplyRequest).filter_by(employee_id=self.employee_id).order_by(SupplyRequest.id.desc()).first()
+                last_req = session.query(SupplyRequest).options(joinedload(SupplyRequest.department)).filter_by(employee_id=self.employee_id).order_by(SupplyRequest.id.desc()).first()
                 if last_req and self.mode == "SATELLITE":
                     if last_req.department:
+                        self.role_input.setText(last_req.department.role or emp.role or "")
                         self.area_input.setText(last_req.department.area_name or "")
                         self.shift_input.setText(last_req.department.shift or "")
                         self.supervisor_input.setText(last_req.department.supervisor or "")
+
+    def autofill_employee_details(self, name):
+        name = name.strip()
+        if not name: return
+        
+        # Don't autofill if we are in "Edit Mode" (already loaded specific data)
+        if self.request_item_id: return
+
+        with SessionLocal() as session:
+            emp = session.query(Employee).filter(func.upper(Employee.name) == name.upper()).first()
+            if emp:
+                # Fetch last request for department info
+                last_req = session.query(SupplyRequest).options(joinedload(SupplyRequest.department)).filter_by(employee_id=emp.id).order_by(SupplyRequest.id.desc()).first()
+                if last_req and last_req.department:
+                    self.role_input.setText(last_req.department.role or emp.role or "")
+                    self.area_input.setText(last_req.department.area_name or "")
+                    self.shift_input.setText(last_req.department.shift or "")
+                    self.supervisor_input.setText(last_req.department.supervisor or "")
+                else:
+                    self.role_input.setText(emp.role or "")
 
     def load_current_data(self):
         with SessionLocal() as session:
@@ -123,11 +153,12 @@ class EditRequestItemDialog(QDialog):
             ).get(self.request_item_id)
             
             if req:
-                self.name_input.setText(req.supply_request.employee.name)
-                self.role_input.setText(req.supply_request.employee.role or "")
+                self.name_input.setCurrentText(req.supply_request.employee.name)
+                self.role_input.setText(req.supply_request.department.role or req.supply_request.employee.role or "")
                 rd = req.supply_request.request_date
                 self.date_edit.setDate(QDate(rd.year, rd.month, rd.day))
-                self.item_name_input.setCurrentText(req.item.name)
+                display = f"{req.item.name} ({req.item.description})" if req.item.description else req.item.name
+                self.item_name_input.setCurrentText(display)
                 self.qty_input.setText(str(req.quantity))
                 
                 if self.mode == "SATELLITE":
@@ -149,10 +180,12 @@ class EditRequestItemDialog(QDialog):
 
     def get_data(self):
         data = {
-            "name": self.name_input.text().strip(),
+            "name": self.name_input.currentText().strip().upper(),
             "role": self.role_input.text().strip(),
             "date": self.date_edit.date().toPyDate(),
-            "item": self.item_name_input.currentText().strip().upper(),
+            # Extract name and description from currentData() or parse currentText()
+            "item_name": self.item_name_input.currentData()["name"] if self.item_name_input.currentData() else self.item_name_input.currentText().strip().upper(),
+            "item_desc": self.item_name_input.currentData()["description"] if self.item_name_input.currentData() else "",
             "qty": float(self.qty_input.text() or 0),
             "source_loc_id": self.source_loc_input.currentData(),
             "dest_loc_id": self.dest_loc_input.currentData(),
@@ -168,7 +201,7 @@ class EditRequestItemDialog(QDialog):
             data["shift"] = self.shift_input.text().strip()
             data["supervisor"] = self.supervisor_input.text().strip()
             data["refill"] = self.is_refill_cb.isChecked()
-            data["freq"] = self.frequency_input.currentText().strip()
+            data["freq"] = normalize_frequency(self.frequency_input.currentText().strip())
             
         return data
 
@@ -204,13 +237,12 @@ class EmployeeDetailsDialog(QDialog):
         layout.addWidget(self.info_box)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "Date", "Area", "Shift", "Item Requested", "Qty", "Refill?", "Frequency", "Req ID"
+            "Date", "Role", "Area", "Shift", "Item Requested", "Qty", "Refill?", "Frequency", "Req ID"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnHidden(7, True)
-        self.table.setColumnHidden(7, True)
+        self.table.setColumnHidden(8, True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems) # Select cells, not just rows
         self.table.setEditTriggers(QTableWidget.EditTrigger.AllEditTriggers)
         self.table.itemChanged.connect(self.save_cell_edit)
@@ -248,10 +280,9 @@ class EmployeeDetailsDialog(QDialog):
             ).filter(Employee.id == self.employee_id).first()
             
             if employee:
-                self.label_role.setText(f"<b>Role:</b> {employee.role or 'N/A'}")
-                # Get the most common or latest department for them
                 if employee.requests and self.mode == "SATELLITE":
                     latest_dept = employee.requests[-1].department
+                    self.label_role.setText(f"<b>Role:</b> {latest_dept.role or employee.role or 'N/A'}")
                     self.label_area.setText(f"<b>Area:</b> {latest_dept.area_name or 'N/A'}")
                     self.label_shift.setText(f"<b>Shift:</b> {latest_dept.shift or 'N/A'}")
                     self.label_super.setText(f"<b>Supervisor:</b> {latest_dept.supervisor or 'N/A'}")
@@ -277,9 +308,9 @@ class EmployeeDetailsDialog(QDialog):
                 # If item_id is not in warehouse_stocks, it truly doesn't exist in the Warehouse storage.
                 pass
             
-            # Master Item Check: Does it have ANY database record in the Warehouse?
-            all_master_items = session.query(Item.name).order_by(Item.name).all()
-            all_item_names = [i[0] for i in all_master_items]
+            # Master Item Check (including descriptions for variants)
+            all_master_items = session.query(Item.name, Item.description).order_by(Item.name).all()
+            all_item_names = [f"{i.name} ({i.description})" if i.description else i.name for i in all_master_items]
 
             if requests:
                 # Calculate tracking metrics
@@ -293,6 +324,7 @@ class EmployeeDetailsDialog(QDialog):
                 self.table.insertRow(row_idx)
                 
                 date_str = req.supply_request.request_date.strftime("%Y-%m-%d")
+                role_str = req.supply_request.department.role or ""
                 area_name = req.supply_request.department.area_name or "Unknown"
                 shift_val = req.supply_request.department.shift or ""
                 
@@ -314,10 +346,12 @@ class EmployeeDetailsDialog(QDialog):
                         bg_color = QColor("#c8e6c9") # Light Green (In Stock)
 
                 self.table.setItem(row_idx, 0, QTableWidgetItem(date_str))
-                self.table.setItem(row_idx, 1, QTableWidgetItem(area_name))
-                self.table.setItem(row_idx, 2, QTableWidgetItem(shift_val))
+                self.table.setItem(row_idx, 1, QTableWidgetItem(role_str))
+                self.table.setItem(row_idx, 2, QTableWidgetItem(area_name))
+                self.table.setItem(row_idx, 3, QTableWidgetItem(shift_val))
                 
-                item_name_text = req.item.name
+                # Show name and description collectively in table for clarity
+                item_name_text = f"{req.item.name} ({req.item.description})" if req.item.description else req.item.name
                 if bg_color and bg_color.name() == "#ffcdd2": # Light Red
                     # CREATE SUGGESTION DROPDOWN
                     combo = QComboBox()
@@ -345,20 +379,20 @@ class EmployeeDetailsDialog(QDialog):
                     # Use activated(int) or textActivated(str)
                     combo.textActivated.connect(lambda name, rid=req_id, c=combo: self.resolve_item_mismatch(rid, c, name))
                     
-                    self.table.setCellWidget(row_idx, 3, combo)
+                    self.table.setCellWidget(row_idx, 4, combo)
                 else:
                     item_cell = QTableWidgetItem(item_name_text)
                     if bg_color:
                         item_cell.setBackground(QBrush(bg_color))
-                    self.table.setItem(row_idx, 3, item_cell)
-                self.table.setItem(row_idx, 4, QTableWidgetItem(str(req.quantity)))
-                self.table.setItem(row_idx, 5, QTableWidgetItem("Yes" if req.is_refill_request else "No"))
-                self.table.setItem(row_idx, 6, QTableWidgetItem(req.frequency or ""))
+                    self.table.setItem(row_idx, 4, item_cell)
+                self.table.setItem(row_idx, 5, QTableWidgetItem(str(req.quantity)))
+                self.table.setItem(row_idx, 6, QTableWidgetItem("Yes" if req.is_refill_request else "No"))
+                self.table.setItem(row_idx, 7, QTableWidgetItem(req.frequency or ""))
                 
-                self.table.setItem(row_idx, 7, QTableWidgetItem(str(req.id))) # Store RequestItem ID here
+                self.table.setItem(row_idx, 8, QTableWidgetItem(str(req.id))) # Store RequestItem ID here
                 
                 # Make non-editable columns read-only
-                for col in [0, 3, 5, 7]: 
+                for col in [0, 4, 6, 8]: 
                     it = self.table.item(row_idx, col)
                     if it: it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
@@ -374,8 +408,18 @@ class EmployeeDetailsDialog(QDialog):
         
         with SessionLocal() as session:
             try:
-                # 1. Fetch the chosen item from master list
-                item_obj = session.query(Item).filter(func.upper(Item.name) == selected_name.upper()).first()
+                # 1. Parse name and description if present in "NAME (DESC)" format
+                name = selected_name
+                description = ""
+                if "(" in selected_name and selected_name.endswith(")"):
+                    name = selected_name[:selected_name.rfind("(")].strip()
+                    description = selected_name[selected_name.rfind("(")+1:-1].strip()
+
+                # 2. Fetch the chosen item variant from master list
+                item_obj = session.query(Item).filter(
+                    func.upper(Item.name) == name.upper(),
+                    func.upper(Item.description) == description.upper()
+                ).first()
                 if not item_obj: return
                 
                 # 2. Update the RequestItem link
@@ -401,8 +445,8 @@ class EmployeeDetailsDialog(QDialog):
         col = item.column()
         new_val = item.text().strip()
         
-        # Get the ID of the RequestItem (stored in hidden col 7)
-        id_item = self.table.item(row, 7)
+        # Get the ID of the RequestItem (stored in hidden col 8)
+        id_item = self.table.item(row, 8)
         if not id_item: return
         request_item_id = int(id_item.text())
 
@@ -414,20 +458,27 @@ class EmployeeDetailsDialog(QDialog):
                 
                 if not req_item: return
 
-                if col == 1: # Area
+                if col == 1: # Role
+                    req_item.supply_request.department.role = new_val
+                elif col == 2: # Area
                     # Update the department name for this request
                     req_item.supply_request.department.area_name = new_val
-                elif col == 2: # Shift
+                elif col == 3: # Shift
                     req_item.supply_request.department.shift = new_val
-                elif col == 4: # Qty
+                elif col == 5: # Qty
                     try:
                         req_item.quantity = float(new_val)
                     except ValueError:
                         QMessageBox.warning(self, "Invalid Input", "Quantity must be a number.")
                         self.load_data()
                         return
-                elif col == 6: # Frequency
+                elif col == 7: # Frequency
+                    new_val = normalize_frequency(new_val)
                     req_item.frequency = new_val
+                    # Refresh the cell display with normalized value
+                    self.table.blockSignals(True)
+                    item.setText(new_val)
+                    self.table.blockSignals(False)
                 
                 session.commit()
                 # Optional visual feedback or just stay quiet
@@ -455,7 +506,7 @@ class EmployeeDetailsDialog(QDialog):
 
             # Extract metadata from the most recent request
             latest = requests[0]
-            role = latest.supply_request.employee.role or ""
+            role = latest.supply_request.department.role or ""
             area = latest.supply_request.department.area_name or "Unknown"
             shift = latest.supply_request.department.shift or ""
             supervisor = latest.supply_request.department.supervisor or ""
@@ -488,7 +539,7 @@ class EmployeeDetailsDialog(QDialog):
             return
             
         row = selected_items[0].row()
-        request_item_id = int(self.table.item(row, 7).text())
+        request_item_id = int(self.table.item(row, 8).text())
         
         dialog = EditRequestItemDialog(request_item_id, mode=self.mode, parent=self)
         if dialog.exec():
@@ -515,8 +566,6 @@ class EmployeeDetailsDialog(QDialog):
                                 # Rename existing employee object (affects all their requests)
                                 old_emp.name = new_name
                         
-                        req_item.supply_request.employee.role = data["role"]
-                        
                         # Update Supply Request (Date & Locations)
                         d = data["date"]
                         new_dt = datetime(d.year, d.month, d.day)
@@ -526,6 +575,7 @@ class EmployeeDetailsDialog(QDialog):
                         
                         # Find or Create Department (Isolation Fix)
                         new_dept = session.query(Department).filter_by(
+                            role=data["role"],
                             area_name=data["area"],
                             shift=data["shift"],
                             supervisor=data["supervisor"]
@@ -533,6 +583,7 @@ class EmployeeDetailsDialog(QDialog):
                         
                         if not new_dept:
                             new_dept = Department(
+                                role=data["role"],
                                 area_name=data["area"],
                                 shift=data["shift"],
                                 supervisor=data["supervisor"]
@@ -542,10 +593,13 @@ class EmployeeDetailsDialog(QDialog):
                         
                         req_item.supply_request.department = new_dept
                         
-                        # Update Item (check if exists)
-                        item_obj = session.query(Item).filter(Item.name == data["item"]).first()
+                        # Update Item (check if exists by name and description)
+                        item_obj = session.query(Item).filter(
+                            Item.name == data["item_name"],
+                            Item.description == data["item_desc"]
+                        ).first()
                         if not item_obj:
-                            item_obj = Item(name=data["item"])
+                            item_obj = Item(name=data["item_name"], description=data["item_desc"])
                             session.add(item_obj)
                             session.flush()
                         
@@ -576,11 +630,10 @@ class EmployeeDetailsDialog(QDialog):
                         emp = Employee(name=new_name, role=data["role"])
                         session.add(emp)
                         session.flush()
-                    else:
-                        emp.role = data["role"]
                     
                     # 2. Get or Create Department
                     dept = session.query(Department).filter_by(
+                        role=data["role"],
                         area_name=data["area"],
                         shift=data["shift"],
                         supervisor=data["supervisor"]
@@ -588,6 +641,7 @@ class EmployeeDetailsDialog(QDialog):
                     
                     if not dept:
                         dept = Department(
+                            role=data["role"],
                             area_name=data["area"],
                             shift=data["shift"],
                             supervisor=data["supervisor"]
@@ -595,10 +649,13 @@ class EmployeeDetailsDialog(QDialog):
                         session.add(dept)
                         session.flush()
 
-                    # 2. Get or Create Item
-                    item_obj = session.query(Item).filter(Item.name == data["item"]).first()
+                    # 2. Get or Create Item (check if exists by name and description)
+                    item_obj = session.query(Item).filter(
+                        Item.name == data["item_name"],
+                        Item.description == data["item_desc"]
+                    ).first()
                     if not item_obj:
-                        item_obj = Item(name=data["item"])
+                        item_obj = Item(name=data["item_name"], description=data["item_desc"])
                         session.add(item_obj)
                         session.flush()
 
@@ -655,7 +712,7 @@ class EmployeeDetailsDialog(QDialog):
             with SessionLocal() as session:
                 try:
                     for row in rows:
-                        req_item_id = int(self.table.item(row, 7).text())
+                        req_item_id = int(self.table.item(row, 8).text())
                         req_item = session.query(RequestItem).options(
                             joinedload(RequestItem.supply_request)
                         ).get(req_item_id)
@@ -982,7 +1039,7 @@ class ConsumptionReportDialog(QDialog):
 
             # Extract metadata from the most recent request
             latest = requests[0]
-            role = latest.supply_request.employee.role or ""
+            role = latest.supply_request.department.role or ""
             area = latest.supply_request.department.area_name or "Unknown"
             shift = latest.supply_request.department.shift or ""
             supervisor = latest.supply_request.department.supervisor or ""
@@ -1083,6 +1140,7 @@ class RequestTrackingApp(QWidget):
         # Employee & Department Details
         self.emp_name_input = QComboBox()
         self.emp_name_input.setEditable(True)
+        self.emp_name_input.currentTextChanged.connect(self.autofill_employee_details)
         form_layout.addRow("Employee Name:", self.emp_name_input)
         
         self.emp_role_input = QLineEdit()
@@ -1116,7 +1174,7 @@ class RequestTrackingApp(QWidget):
             
             self.frequency_input = QComboBox()
             self.frequency_input.setEditable(True)
-            self.frequency_input.addItems(["1 WEEK", "2 WEEKS", "1 MONTH", "UNTIL DEFECTIVE", "REFILL"])
+            self.frequency_input.addItems(["1 WEEK", "2 WEEKS", "ONCE A WEEK", "TWICE A WEEK", "1 MONTH", "ONCE A MONTH", "UNTIL DEFECTIVE", "REFILL"])
             form_layout.addRow("Frequency:", self.frequency_input)
         
         self.source_loc_input = QComboBox()
@@ -1151,7 +1209,7 @@ class RequestTrackingApp(QWidget):
         top_filter_layout = QHBoxLayout()
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search Employee Name or Role...")
-        self.search_bar.textChanged.connect(self.filter_table)
+        self.search_bar.textChanged.connect(self.run_search)
         top_filter_layout.addWidget(self.search_bar)
         
         self.table_panel.addLayout(top_filter_layout)
@@ -1245,9 +1303,11 @@ class RequestTrackingApp(QWidget):
                 # Lock the destination location to prevent cross-contamination
                 self.dest_loc_input.setEnabled(False)
             
-            # Load item names
-            items = session.query(Item).all()
-            self.item_name_input.addItems([i.name for i in items])
+            # Load item names with descriptions
+            items = session.query(Item.name, Item.description).all()
+            for i in items:
+                display = f"{i.name} ({i.description})" if i.description else i.name
+                self.item_name_input.addItem(display, {"name": i.name, "description": i.description or ""})
             
             if self.mode == "SATELLITE":
                 # Load existing Areas for autocomplete
@@ -1257,12 +1317,38 @@ class RequestTrackingApp(QWidget):
                 # Load into filter dropdown too
                 self.area_filter.addItems([a[0] for a in distinct_areas if a[0]])
 
+            # Load employee names for autofill
+            employees = session.query(Employee.name).order_by(Employee.name).all()
+            self.emp_name_input.addItems([e[0] for e in employees])
+            self.emp_name_input.setCurrentText("") # Start empty
+
+    def autofill_employee_details(self, name):
+        name = name.strip()
+        if not name: return
+
+        with SessionLocal() as session:
+            emp = session.query(Employee).filter(func.upper(Employee.name) == name.upper()).first()
+            if emp:
+                # Fetch last request for department info
+                last_req = session.query(SupplyRequest).options(joinedload(SupplyRequest.department)).filter_by(employee_id=emp.id).order_by(SupplyRequest.id.desc()).first()
+                if last_req and last_req.department:
+                    self.emp_role_input.setText(last_req.department.role or emp.role or "")
+                    if self.mode == "SATELLITE":
+                        self.area_input.setCurrentText(last_req.department.area_name or "")
+                        self.shift_input.setText(last_req.department.shift or "")
+                        self.supervisor_input.setText(last_req.department.supervisor or "")
+                else:
+                    self.emp_role_input.setText(emp.role or "")
+
 
     def submit_request(self):
         """Handles saving form data into SQLite via SQLAlchemy."""
         emp_name = self.emp_name_input.currentText().strip()
         qty_str = self.quantity_input.text().strip()
-        item_name = self.item_name_input.currentText().strip()
+        
+        # Extract name and description from currentData() or parse currentText()
+        item_name = self.item_name_input.currentData()["name"] if self.item_name_input.currentData() else self.item_name_input.currentText().strip().upper()
+        item_description = self.item_name_input.currentData()["description"] if self.item_name_input.currentData() else ""
         
         # Collect secondary fields (Conditional)
         role = self.emp_role_input.text().strip()
@@ -1277,7 +1363,7 @@ class RequestTrackingApp(QWidget):
             shift = self.shift_input.text().strip()
             supervisor = self.supervisor_input.text().strip()
             is_refill = self.is_refill_cb.isChecked()
-            freq = self.frequency_input.currentText().strip()
+            freq = normalize_frequency(self.frequency_input.currentText().strip())
 
         # Basic GUI-level validation
         if not emp_name or not qty_str or not item_name:
@@ -1302,13 +1388,16 @@ class RequestTrackingApp(QWidget):
                     session.flush()
                 
                 # 2. Get or Create Department
+                dept_role = self.emp_role_input.text().strip()
                 dept = session.query(Department).filter_by(
+                    role=dept_role,
                     area_name=area, 
                     shift=shift,
                     supervisor=supervisor
                 ).first()
                 if not dept:
                     dept = Department(
+                        role=dept_role,
                         area_name=area, 
                         shift=shift, 
                         supervisor=supervisor
@@ -1316,10 +1405,10 @@ class RequestTrackingApp(QWidget):
                     session.add(dept)
                     session.flush()
 
-                # 3. Get or Create Item
-                item = session.query(Item).filter_by(name=item_name).first()
+                # 3. Get or Create Item (check if exists by name and description)
+                item = session.query(Item).filter_by(name=item_name, description=item_description).first()
                 if not item:
-                    item = Item(name=item_name)
+                    item = Item(name=item_name, description=item_description)
                     session.add(item)
                     session.flush()
 
@@ -1361,12 +1450,49 @@ class RequestTrackingApp(QWidget):
                 session.commit()
                 QMessageBox.information(self, "Success", "Supply request successfully logged!")
                 
+                self.reload_autofill_dropdowns()
                 self.clear_form(full=False)
                 self.refresh_table()
                 
             except Exception as e:
                 session.rollback()
                 QMessageBox.critical(self, "Database Error", f"Failed to save to database:\n{str(e)}")
+
+    def reload_autofill_dropdowns(self):
+        """Reloads dynamic dropdowns (like employees and items) to capture newly encoded data."""
+        with SessionLocal() as session:
+            # Reload employees
+            employees = session.query(Employee.name).order_by(Employee.name).all()
+            self.emp_name_input.blockSignals(True)
+            self.emp_name_input.clear()
+            self.emp_name_input.addItems([e[0] for e in employees])
+            self.emp_name_input.setCurrentText("")
+            self.emp_name_input.blockSignals(False)
+
+            # Reload items
+            items = session.query(Item.name, Item.description).all()
+            self.item_name_input.blockSignals(True)
+            self.item_name_input.clear()
+            for i in items:
+                display = f"{i.name} ({i.description})" if i.description else i.name
+                self.item_name_input.addItem(display, {"name": i.name, "description": i.description or ""})
+            self.item_name_input.setCurrentText("")
+            self.item_name_input.blockSignals(False)
+            
+            if self.mode == "SATELLITE":
+                distinct_areas = session.query(Department.area_name).distinct().all()
+                self.area_input.blockSignals(True)
+                self.area_input.clear()
+                self.area_input.addItems([a[0] for a in distinct_areas if a[0]])
+                self.area_input.setCurrentText("")
+                self.area_input.blockSignals(False)
+                
+                # Also refresh Area Filter, but preserve 'ALL'
+                self.area_filter.blockSignals(True)
+                self.area_filter.clear()
+                self.area_filter.addItem("ALL")
+                self.area_filter.addItems([a[0] for a in distinct_areas if a[0]])
+                self.area_filter.blockSignals(False)
 
     def refresh_table(self):
         """Loads a list of distinct employees and their request count matching the date, area, and shift filters."""
@@ -1400,7 +1526,9 @@ class RequestTrackingApp(QWidget):
             if search_text:
                 query = query.filter((Employee.name.ilike(f"%{search_text}%")) | (Employee.role.ilike(f"%{search_text}%")))
 
-            if area_filter and area_filter != "ALL":
+            # Global Search Override: If there's text in the search bar, ignore the Area filter
+            # This makes it easier to find employees regardless of the current dropdown state.
+            if not search_text and area_filter and area_filter != "ALL":
                 query = query.filter(Department.area_name == area_filter)
 
             # Filtering by date range (only if they have requests)
@@ -1433,7 +1561,9 @@ class RequestTrackingApp(QWidget):
                 self.table.insertRow(row_idx)
                 self.table.setItem(row_idx, 0, QTableWidgetItem(str(emp.id)))
                 self.table.setItem(row_idx, 1, QTableWidgetItem(emp.name))
-                self.table.setItem(row_idx, 2, QTableWidgetItem(emp.role or "N/A"))
+                
+                role_val = latest_req.department.role if latest_req and latest_req.department else (emp.role or "N/A")
+                self.table.setItem(row_idx, 2, QTableWidgetItem(role_val))
                 
                 row_idx += 1
         self.filter_table()

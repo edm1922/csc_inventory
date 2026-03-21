@@ -130,7 +130,7 @@ class EditItemDialog(QDialog):
     def get_data(self):
         return {
             "name": self.name_input.text().strip().upper(),
-            "description": self.desc_input.text().strip(),
+            "description": self.desc_input.text().strip().upper(),
             "unit": self.unit_input.currentText().strip().upper(),
             "price": float(self.price_input.text() or 0.0),
             "std_stock": float(self.std_stock_input.text() or 0.0),
@@ -197,6 +197,7 @@ class InventoryManager(QWidget):
         self.table.setColumnHidden(7, True) # ID column
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setSortingEnabled(True)
         self.table.cellDoubleClicked.connect(self.edit_item)
         self.main_layout.addWidget(self.table)
         
@@ -211,6 +212,7 @@ class InventoryManager(QWidget):
     def load_data(self):
         search = self.search_input.text().strip().upper()
         loc_filter_id = self.location_filter.currentData()
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         
         with SessionLocal() as session:
@@ -253,8 +255,18 @@ class InventoryManager(QWidget):
                 self.table.setItem(i, 6, QTableWidgetItem(loc_name))
                 self.table.setItem(i, 7, QTableWidgetItem(str(item.id)))
 
+            self.table.setSortingEnabled(True)
+            self.table.sortItems(0, Qt.SortOrder.AscendingOrder)
+
     def add_item(self):
         dialog = EditItemDialog(parent=self)
+        # Pre-select based on current filter
+        loc_id = self.location_filter.currentData()
+        if loc_id:
+            index = dialog.location_input.findData(loc_id)
+            if index >= 0:
+                dialog.location_input.setCurrentIndex(index)
+                
         if dialog.exec():
             data = dialog.get_data()
             self.save_item(None, data)

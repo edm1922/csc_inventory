@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 
 # Excel Reports and Temporary Files
-*.xlsx
 *.json
 ~$*
 *.log
