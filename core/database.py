@@ -4,7 +4,8 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, D
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, validates
 
 # Setup Database connection
-DB_FILE = "supply_system.db"
+current_dir = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.abspath(os.path.join(current_dir, "..", "data", "supply_system.db"))
 engine = create_engine(f"sqlite:///{DB_FILE}", echo=False)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()

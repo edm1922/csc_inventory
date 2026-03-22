@@ -237,12 +237,12 @@ class EmployeeDetailsDialog(QDialog):
         layout.addWidget(self.info_box)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
-            "Date", "Role", "Area", "Shift", "Item Requested", "Qty", "Refill?", "Frequency", "Req ID"
+            "Date", "Role", "Area", "Shift", "Item Requested", "Qty", "Refill?", "Frequency", "Status", "Req ID"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnHidden(8, True)
+        self.table.setColumnHidden(9, True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems) # Select cells, not just rows
         self.table.setEditTriggers(QTableWidget.EditTrigger.AllEditTriggers)
         self.table.itemChanged.connect(self.save_cell_edit)
@@ -291,22 +291,15 @@ class EmployeeDetailsDialog(QDialog):
                 SupplyRequest.employee_id == self.employee_id
             ).options(
                 joinedload(RequestItem.item),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department)
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department),
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.source_location)
             ).order_by(RequestItem.id.desc()).all()
             
-            # Pre-fetch Warehouse ID and Stock Levels for highlighting
-            warehouse_id = session.query(Location.id).filter_by(name="WAREHOUSE").scalar()
-            warehouse_stocks = {}
-            if warehouse_id:
-                stocks = session.query(Stock).filter_by(location_id=warehouse_id).all()
-                warehouse_stocks = {s.item_id: s.quantity for s in stocks}
-            
-            # Fetch Warehouse Stock for all requested items to check status
-            referenced_item_ids = [r.item_id for r in requests]
-            if warehouse_id:
-                # warehouse_stocks mapping: {item_id: quantity}
-                # If item_id is not in warehouse_stocks, it truly doesn't exist in the Warehouse storage.
-                pass
+            # Pre-fetch ALL stock levels to allow dynamic highlighting based on source
+            all_stocks = {} # {(location_id, item_id): quantity}
+            stocks = session.query(Stock).all()
+            for s in stocks:
+                all_stocks[(s.location_id, s.item_id)] = s.quantity
             
             # Master Item Check (including descriptions for variants)
             all_master_items = session.query(Item.name, Item.description).order_by(Item.name).all()
@@ -328,22 +321,19 @@ class EmployeeDetailsDialog(QDialog):
                 area_name = req.supply_request.department.area_name or "Unknown"
                 shift_val = req.supply_request.department.shift or ""
                 
-                # Determine Highlight Color
-                # Determine Highlight Color based on Warehouse Status
-                # Red: Item NOT found in Warehouse system (no stock record for WAREHOUSE)
-                # Orange: Item found in Warehouse but Out of Stock (Qty <= 0)
-                # Green: Item found in Warehouse and In Stock (Qty > 0)
+                # Determine Highlight Color based on its actual Fulfillment Source
                 bg_color = None
+                source_id = req.supply_request.source_location_id
                 
-                # Check if item has a stock entry for the warehouse
-                if req.item_id not in warehouse_stocks:
-                    bg_color = QColor("#ffcdd2") # Light Red (Non-existing in Warehouse)
+                # Check if item exists at the selected source
+                if (source_id, req.item_id) not in all_stocks:
+                    bg_color = QColor("#ffcdd2") # Light Red (Non-existing at Source)
                 else:
-                    qty = warehouse_stocks.get(req.item_id, 0.0)
+                    qty = all_stocks.get((source_id, req.item_id), 0.0)
                     if qty <= 0:
-                        bg_color = QColor("#ffe0b2") # Light Orange (Out of Stock)
+                        bg_color = QColor("#ffe0b2") # Light Orange (Out of Stock at Source)
                     else:
-                        bg_color = QColor("#c8e6c9") # Light Green (In Stock)
+                        bg_color = QColor("#c8e6c9") # Light Green (In Stock at Source)
 
                 self.table.setItem(row_idx, 0, QTableWidgetItem(date_str))
                 self.table.setItem(row_idx, 1, QTableWidgetItem(role_str))
@@ -389,14 +379,82 @@ class EmployeeDetailsDialog(QDialog):
                 self.table.setItem(row_idx, 6, QTableWidgetItem("Yes" if req.is_refill_request else "No"))
                 self.table.setItem(row_idx, 7, QTableWidgetItem(req.frequency or ""))
                 
-                self.table.setItem(row_idx, 8, QTableWidgetItem(str(req.id))) # Store RequestItem ID here
+                # Set Request ID in Hidden Column
+                self.table.setItem(row_idx, 9, QTableWidgetItem(str(req.id))) 
                 
+                # --- NEW: STATUS MARKING SYSTEM FOR CUSTODIAN ---
+                status_btn = QPushButton(req.supply_request.status or "PENDING")
+                status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                
+                # Dynamic Styling based on Status
+                if req.supply_request.status == "FULFILLED":
+                    status_btn.setStyleSheet("background-color: #c8e6c9; color: #2e7d32; font-weight: bold; border-radius: 4px;")
+                    status_btn.setEnabled(False) # Locked once fulfilled
+                else:
+                    status_btn.setStyleSheet("background-color: #fff9c4; color: #f57f17; font-weight: bold; border-radius: 4px;")
+                
+                # Connect click to fulfillment logic
+                status_btn.clicked.connect(lambda checked, r=req: self.mark_as_fulfilled(r))
+                self.table.setCellWidget(row_idx, 8, status_btn)
+
                 # Make non-editable columns read-only
-                for col in [0, 4, 6, 8]: 
+                for col in [0, 4, 6, 8, 9]: 
                     it = self.table.item(row_idx, col)
                     if it: it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
         self.table.blockSignals(False)
+
+    def mark_as_fulfilled(self, request_item):
+        """Marks a request as fulfilled and deducts stock with safeguards."""
+        ans = QMessageBox.question(self, "Confirm Fulfillment", 
+                                 f"Mark '{request_item.item.name}' as FULFILLED and deduct quantity from inventory?",
+                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if ans != QMessageBox.StandardButton.Yes: return
+
+        with SessionLocal() as session:
+            try:
+                # Re-fetch from DB to ensure fresh state
+                req_item = session.query(RequestItem).options(
+                    joinedload(RequestItem.supply_request),
+                    joinedload(RequestItem.item)
+                ).get(request_item.id)
+                
+                if req_item.supply_request.status == "FULFILLED":
+                    QMessageBox.warning(self, "Already Fulfilled", "This request has already been processed.")
+                    return
+
+                # Check Inventory Safeguard
+                source_id = req_item.supply_request.source_location_id
+                stock = session.query(Stock).filter_by(item_id=req_item.item_id, location_id=source_id).first()
+                
+                current_qty = stock.quantity if stock else 0.0
+                if current_qty < req_item.quantity:
+                    QMessageBox.warning(self, "Insufficient Stock", 
+                                       f"Cannot fulfill: Only {current_qty} units available at the selected source.\n"
+                                       f"Quantity Needed: {req_item.quantity}\n\n"
+                                       "Please restock the inventory source first.")
+                    return
+
+                # Deduct Stock
+                if stock:
+                    stock.quantity -= req_item.quantity
+                else:
+                    # Defensive: Should theoretically be caught by qty check above
+                    new_stock = Stock(item_id=req_item.item_id, location_id=source_id, quantity=-req_item.quantity)
+                    session.add(new_stock)
+
+                # Update Status
+                req_item.supply_request.status = "FULFILLED"
+                session.commit()
+                
+                QMessageBox.information(self, "Success", "Request fulfilled! Inventory updated.")
+                self.load_data()
+                if self.parent(): self.parent().refresh_table()
+                
+            except Exception as e:
+                session.rollback()
+                QMessageBox.critical(self, "Error", f"Fulfillment failed: {str(e)}")
 
     def resolve_item_mismatch(self, request_item_id, combo_box, selected_name=None):
         """Updates the RequestItem's linked item when a suggestion is picked."""
@@ -445,8 +503,8 @@ class EmployeeDetailsDialog(QDialog):
         col = item.column()
         new_val = item.text().strip()
         
-        # Get the ID of the RequestItem (stored in hidden col 8)
-        id_item = self.table.item(row, 8)
+        # Get the ID of the RequestItem (stored in hidden col 9)
+        id_item = self.table.item(row, 9)
         if not id_item: return
         request_item_id = int(id_item.text())
 
@@ -1437,18 +1495,11 @@ class RequestTrackingApp(QWidget):
                 )
                 session.add(req_item)
 
-                # 6. Deduct Stock from Source
-                source_id = self.source_loc_input.currentData()
-                stock = session.query(Stock).filter_by(item_id=item.id, location_id=source_id).first()
-                if stock:
-                    stock.quantity -= qty_float
-                else:
-                    # If no stock entry exists, assume 0 and go negative (allowance for missing initial data)
-                    new_stock = Stock(item_id=item.id, location_id=source_id, quantity=-qty_float)
-                    session.add(new_stock)
+                # 6. Set initial status as PENDING (No stock deduction yet)
+                new_request.status = "PENDING"
                 
                 session.commit()
-                QMessageBox.information(self, "Success", "Supply request successfully logged!")
+                QMessageBox.information(self, "Success", "Supply request logged (Status: PENDING).\n\nInventory will be deducted only once a custodian marks it as Fulfilled.")
                 
                 self.reload_autofill_dropdowns()
                 self.clear_form(full=False)
