@@ -1,13 +1,21 @@
 import sys
+import os
+
+# Add core and modules to search path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(current_dir, 'core'))
+sys.path.append(os.path.join(current_dir, 'modules'))
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QStackedWidget, QFrame)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QIcon, QFont, QColor
 
-# Import the existing modules
+# These are now found in sys.path (modules/ and core/)
 from request_main import RequestTrackingApp
 from inventory_main import InventoryManager
 from purchase_main import PurchaseManager
+from dashboard_main import SmartDashboard
 from database import init_db
 
 class MainMenu(QWidget):
@@ -31,37 +39,37 @@ class MainMenu(QWidget):
         
         # Buttons Layout
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(40)
+        btn_layout.setSpacing(20)
         btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Satellite Request Button
+        # 1. Smart Analysis (NEW)
+        self.smart_btn = self.create_menu_button(
+            "📊", "Smart Analysis", 
+            "Visual stats, stock alerts, and automated reports.",
+            "#8e44ad"
+        )
+        self.smart_btn.clicked.connect(lambda: self.parent_window.switch_view(5))
+        btn_layout.addWidget(self.smart_btn)
+
+        # 2. Unified Request Button
         self.request_btn = self.create_menu_button(
-            "🛰️", "Satellite Office Request", 
-            "Track employee issuances for satellite areas.",
+            "🛰️", "Request Section", 
+            "Track all office issuances and status.",
             "#2980b9"
         )
         self.request_btn.clicked.connect(lambda: self.parent_window.switch_view(1))
         btn_layout.addWidget(self.request_btn)
         
-        # Main Office Request Button
-        self.main_office_btn = self.create_menu_button(
-            "🏢", "Main Office Request", 
-            "Log internal supplies for the main office storage.",
-            "#8e44ad"
-        )
-        self.main_office_btn.clicked.connect(lambda: self.parent_window.switch_view(2))
-        btn_layout.addWidget(self.main_office_btn)
-        
-        # Inventory Button
+        # 3. Inventory Button
         self.inventory_btn = self.create_menu_button(
             "📋", "Inventory Manager", 
-            "Manage stock levels, prices, and suppliers.",
+            "Manage stock levels, thresholds, and suppliers.",
             "#27ae60"
         )
         self.inventory_btn.clicked.connect(lambda: self.parent_window.switch_view(3))
         btn_layout.addWidget(self.inventory_btn)
         
-        # Purchase Request Button
+        # 4. Purchase Request Button
         self.purchase_btn = self.create_menu_button(
             "🛒", "Purchase Request", 
             "Create and print formal Purchase Request forms.",
@@ -80,22 +88,21 @@ class MainMenu(QWidget):
 
     def create_menu_button(self, icon_char, title, description, color):
         btn = QPushButton()
-        btn.setFixedSize(300, 200)
+        btn.setFixedSize(260, 200) # Slightly smaller to fit 4
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        # We'll use a layout inside the button to style it
         btn_layout = QVBoxLayout(btn)
         
         icon_lbl = QLabel(icon_char)
-        icon_lbl.setStyleSheet(f"font-size: 48px; color: {color}; background: transparent;")
+        icon_lbl.setStyleSheet(f"font-size: 40px; color: {color}; background: transparent;")
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         title_lbl = QLabel(title)
-        title_lbl.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {color}; background: transparent;")
+        title_lbl.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color}; background: transparent;")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         desc_lbl = QLabel(description)
-        desc_lbl.setStyleSheet("font-size: 12px; color: #666; background: transparent;")
+        desc_lbl.setStyleSheet("font-size: 11px; color: #666; background: transparent;")
         desc_lbl.setWordWrap(True)
         desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
@@ -121,36 +128,33 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Unified Inventory System")
-        self.setMinimumSize(1100, 750)
+        self.setMinimumSize(1200, 800)
         
-        # Central Stacked Widget
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
         
-        # Initialize Views
         self.menu_view = MainMenu(self)
-        self.sat_request_view = RequestTrackingApp(mode="SATELLITE")
-        self.main_request_view = RequestTrackingApp(mode="MAIN_OFFICE")
+        self.unified_request_view = RequestTrackingApp(mode="UNIFIED")
         self.inventory_view = InventoryManager()
+        self.purchase_view = PurchaseManager()
+        self.smart_view = SmartDashboard()
         
         # Add a "Back to Menu" button to the sub-views
-        self.add_nav_bar(self.sat_request_view)
-        self.add_nav_bar(self.main_request_view)
+        self.add_nav_bar(self.unified_request_view)
         self.add_nav_bar(self.inventory_view)
-        
-        self.stack.addWidget(self.menu_view)          # 0
-        self.stack.addWidget(self.sat_request_view)   # 1
-        self.stack.addWidget(self.main_request_view)  # 2
-        self.stack.addWidget(self.inventory_view)     # 3
-        
-        self.purchase_view = PurchaseManager()
         self.add_nav_bar(self.purchase_view)
-        self.stack.addWidget(self.purchase_view)      # 4
+        self.add_nav_bar(self.smart_view)
+        
+        self.stack.addWidget(self.menu_view)               # 0
+        self.stack.addWidget(self.unified_request_view)    # 1
+        self.stack.addWidget(QWidget())                    # 2 (Placeholder)
+        self.stack.addWidget(self.inventory_view)          # 3
+        self.stack.addWidget(self.purchase_view)           # 4
+        self.stack.addWidget(self.smart_view)              # 5
         
         self.stack.setCurrentIndex(0)
 
     def add_nav_bar(self, widget):
-        # Insert a navigation bar at the top of existing layouts
         if widget.layout():
             nav_layout = QHBoxLayout()
             back_btn = QPushButton("⬅ Back to Main Menu")
@@ -169,30 +173,25 @@ class MainWindow(QMainWindow):
             back_btn.clicked.connect(lambda: self.switch_view(0))
             nav_layout.addWidget(back_btn)
             nav_layout.addStretch()
-            
-            # Insert at the top of the existing layout
             widget.layout().insertLayout(0, nav_layout)
 
     def switch_view(self, index):
         self.stack.setCurrentIndex(index)
         if index == 1:
-            self.sat_request_view.refresh_table()
-        elif index == 2:
-            self.main_request_view.refresh_table()
+            self.unified_request_view.refresh_table()
         elif index == 3:
             self.inventory_view.load_data()
         elif index == 4:
             self.purchase_view.load_data()
+        elif index == 5:
+            self.smart_view.load_data()
 
 if __name__ == "__main__":
     init_db()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    
-    # Modern global font
     font = QFont("Segoe UI", 10)
     app.setFont(font)
-    
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
