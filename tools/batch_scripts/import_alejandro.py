@@ -124,7 +124,6 @@ def run_import():
                         request_id=new_request.id,
                         item_id=item.id,
                         quantity=qty_val,
-                        is_refill_request=is_refill,
                         frequency=freq_val
                     )
                     session.add(request_item)

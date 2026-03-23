@@ -30,8 +30,7 @@ def seed_test_data():
             ri = RequestItem(
                 request_id=req.id,
                 item_id=item.id,
-                quantity=1.0,
-                is_refill_request=False
+                quantity=random.uniform(1, 10)
             )
             session.add(ri)
         

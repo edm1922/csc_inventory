@@ -105,12 +105,20 @@ class PurchaseRequestDialog(QDialog):
 
     def auto_generate_pr_no(self):
         with SessionLocal() as session:
-            last_pr = session.query(PurchaseRequest).order_by(PurchaseRequest.id.desc()).first()
-            if last_pr and last_pr.pr_no.isdigit():
-                next_no = int(last_pr.pr_no) + 1
-                self.pr_no_input.setText(str(next_no).zfill(6))
-            else:
-                self.pr_no_input.setText("000001")
+            # Query all PR numbers to find the actual maximum numeric value
+            all_pnos = session.query(PurchaseRequest.pr_no).all()
+            max_val = 0
+            for (pno,) in all_pnos:
+                try:
+                    # Clean the string in case of leading/trailing spaces
+                    val = int(pno.strip())
+                    if val > max_val:
+                        max_val = val
+                except (ValueError, AttributeError):
+                    continue
+            
+            next_no = max_val + 1
+            self.pr_no_input.setText(str(next_no).zfill(6))
 
     def add_blank_row(self):
         row = self.items_table.rowCount()

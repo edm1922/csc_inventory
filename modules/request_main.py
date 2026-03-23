@@ -43,7 +43,6 @@ class EditRequestItemDialog(QDialog):
         self.qty_input = QLineEdit()
         self.qty_input.setValidator(QDoubleValidator(0.1, 999.0, 2))
         
-        self.is_refill_cb = QCheckBox("Is this a refill?")
         self.frequency_input = QComboBox()
         self.frequency_input.setEditable(True)
         self.frequency_input.addItems(["1 WEEK", "2 WEEKS", "ONCE A WEEK", "TWICE A WEEK", "1 MONTH", "ONCE A MONTH", "UNTIL DEFECTIVE", "REFILL"])
@@ -54,18 +53,15 @@ class EditRequestItemDialog(QDialog):
         form.addRow("Request Date:", self.date_edit)
         form.addRow("Employee Name:", self.name_input)
         
-        if self.mode == "SATELLITE":
-            form.addRow("Employee Role:", self.role_input)
-            form.addRow("Area/Department:", self.area_input)
-            form.addRow("Shift:", self.shift_input)
-            form.addRow("Supervisor:", self.supervisor_input)
+        form.addRow("Employee Role:", self.role_input)
+        form.addRow("Area/Department:", self.area_input)
+        form.addRow("Shift:", self.shift_input)
+        form.addRow("Supervisor:", self.supervisor_input)
             
         form.addRow("Item Name:", self.item_name_input)
         form.addRow("Quantity:", self.qty_input)
         
-        if self.mode == "SATELLITE":
-            form.addRow("Refill Request:", self.is_refill_cb)
-            form.addRow("Frequency:", self.frequency_input)
+        form.addRow("Frequency:", self.frequency_input)
             
         form.addRow("Fulfillment Source:", self.source_loc_input)
         form.addRow("Requesting Office:", self.dest_loc_input)
@@ -161,13 +157,10 @@ class EditRequestItemDialog(QDialog):
                 self.item_name_input.setCurrentText(display)
                 self.qty_input.setText(str(req.quantity))
                 
-                if self.mode == "SATELLITE":
-                    if req.supply_request.department:
-                        self.area_input.setText(req.supply_request.department.area_name or "")
-                        self.shift_input.setText(req.supply_request.department.shift or "")
-                        self.supervisor_input.setText(req.supply_request.department.supervisor or "")
-                    self.is_refill_cb.setChecked(req.is_refill_request)
-                    self.frequency_input.setCurrentText(req.frequency or "")
+                self.area_input.setText(req.supply_request.department.area_name or "")
+                self.shift_input.setText(req.supply_request.department.shift or "")
+                self.supervisor_input.setText(req.supply_request.department.supervisor or "")
+                self.frequency_input.setCurrentText(req.frequency or "")
                 
                 # Set Locations by ID (much safer than names)
                 if req.supply_request.source_location_id:
@@ -196,12 +189,10 @@ class EditRequestItemDialog(QDialog):
             "freq": "N/A"
         }
         
-        if self.mode == "SATELLITE":
-            data["area"] = self.area_input.text().strip()
-            data["shift"] = self.shift_input.text().strip()
-            data["supervisor"] = self.supervisor_input.text().strip()
-            data["refill"] = self.is_refill_cb.isChecked()
-            data["freq"] = normalize_frequency(self.frequency_input.currentText().strip())
+        data["area"] = self.area_input.text().strip()
+        data["shift"] = self.shift_input.text().strip()
+        data["supervisor"] = self.supervisor_input.text().strip()
+        data["freq"] = normalize_frequency(self.frequency_input.currentText().strip())
             
         return data
 
@@ -226,9 +217,7 @@ class EmployeeDetailsDialog(QDialog):
         self.label_first = QLabel("<b>First Issuance:</b> N/A")
         self.label_total = QLabel("<b>Total Items:</b> 0")
         
-        header_labels = [self.label_first, self.label_total]
-        if self.mode == "SATELLITE":
-            header_labels = [self.label_role, self.label_area, self.label_shift, self.label_super] + header_labels
+        header_labels = [self.label_role, self.label_area, self.label_shift, self.label_super, self.label_first, self.label_total]
         
         for lbl in header_labels:
             lbl.setTextFormat(Qt.TextFormat.RichText)
@@ -237,12 +226,12 @@ class EmployeeDetailsDialog(QDialog):
         layout.addWidget(self.info_box)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(10)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "Date", "Role", "Area", "Shift", "Item Requested", "Qty", "Refill?", "Frequency", "Status", "Req ID"
+            "Date", "Role", "Area", "Shift", "Item Requested", "Qty", "Frequency", "Status", "Req ID"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnHidden(9, True)
+        self.table.setColumnHidden(8, True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems) # Select cells, not just rows
         self.table.setEditTriggers(QTableWidget.EditTrigger.AllEditTriggers)
         self.table.itemChanged.connect(self.save_cell_edit)
@@ -280,7 +269,7 @@ class EmployeeDetailsDialog(QDialog):
             ).filter(Employee.id == self.employee_id).first()
             
             if employee:
-                if employee.requests and self.mode == "SATELLITE":
+                if employee.requests:
                     latest_dept = employee.requests[-1].department
                     self.label_role.setText(f"<b>Role:</b> {latest_dept.role or employee.role or 'N/A'}")
                     self.label_area.setText(f"<b>Area:</b> {latest_dept.area_name or 'N/A'}")
@@ -375,12 +364,8 @@ class EmployeeDetailsDialog(QDialog):
                     if bg_color:
                         item_cell.setBackground(QBrush(bg_color))
                     self.table.setItem(row_idx, 4, item_cell)
-                self.table.setItem(row_idx, 5, QTableWidgetItem(str(req.quantity)))
-                self.table.setItem(row_idx, 6, QTableWidgetItem("Yes" if req.is_refill_request else "No"))
-                self.table.setItem(row_idx, 7, QTableWidgetItem(req.frequency or ""))
-                
-                # Set Request ID in Hidden Column
-                self.table.setItem(row_idx, 9, QTableWidgetItem(str(req.id))) 
+                self.table.setItem(row_idx, 5, QTableWidgetItem(f"{req.quantity:.2f}"))
+                self.table.setItem(row_idx, 6, QTableWidgetItem(req.frequency or ""))
                 
                 # --- NEW: STATUS MARKING SYSTEM FOR CUSTODIAN ---
                 status_btn = QPushButton(req.supply_request.status or "PENDING")
@@ -390,15 +375,13 @@ class EmployeeDetailsDialog(QDialog):
                 if req.supply_request.status == "FULFILLED":
                     status_btn.setStyleSheet("background-color: #c8e6c9; color: #2e7d32; font-weight: bold; border-radius: 4px;")
                     status_btn.setEnabled(False) # Locked once fulfilled
-                else:
-                    status_btn.setStyleSheet("background-color: #fff9c4; color: #f57f17; font-weight: bold; border-radius: 4px;")
+                self.table.setCellWidget(row_idx, 7, status_btn)
                 
-                # Connect click to fulfillment logic
-                status_btn.clicked.connect(lambda checked, r=req: self.mark_as_fulfilled(r))
-                self.table.setCellWidget(row_idx, 8, status_btn)
-
+                # Set Request ID in Hidden Column (index 8)
+                self.table.setItem(row_idx, 8, QTableWidgetItem(str(req.id))) 
+                
                 # Make non-editable columns read-only
-                for col in [0, 4, 6, 8, 9]: 
+                for col in [0, 4, 7, 8]: 
                     it = self.table.item(row_idx, col)
                     if it: it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
@@ -503,8 +486,8 @@ class EmployeeDetailsDialog(QDialog):
         col = item.column()
         new_val = item.text().strip()
         
-        # Get the ID of the RequestItem (stored in hidden col 9)
-        id_item = self.table.item(row, 9)
+        # Get the ID of the RequestItem (stored in hidden col 8)
+        id_item = self.table.item(row, 8)
         if not id_item: return
         request_item_id = int(id_item.text())
 
@@ -530,7 +513,7 @@ class EmployeeDetailsDialog(QDialog):
                         QMessageBox.warning(self, "Invalid Input", "Quantity must be a number.")
                         self.load_data()
                         return
-                elif col == 7: # Frequency
+                elif col == 6: # Frequency
                     new_val = normalize_frequency(new_val)
                     req_item.frequency = new_val
                     # Refresh the cell display with normalized value
@@ -576,7 +559,7 @@ class EmployeeDetailsDialog(QDialog):
                     r.supply_request.request_date.strftime("%Y-%m-%d"),
                     r.item.name,
                     r.quantity,
-                    "Yes" if r.is_refill_request else "No",
+                    "N/A", # is_refill_request is removed
                     r.frequency or ""
                 ))
 
@@ -663,7 +646,7 @@ class EmployeeDetailsDialog(QDialog):
                         
                         req_item.item_id = item_obj.id
                         req_item.quantity = data["qty"]
-                        req_item.is_refill_request = data["refill"]
+                        
                         req_item.frequency = data["freq"]
                         
                         session.commit()
@@ -736,7 +719,6 @@ class EmployeeDetailsDialog(QDialog):
                         request_id=supply_req.id,
                         item_id=item_obj.id,
                         quantity=data["qty"],
-                        is_refill_request=data["refill"],
                         frequency=data["freq"]
                     )
                     session.add(req_item)
@@ -792,6 +774,142 @@ class EmployeeDetailsDialog(QDialog):
                 except Exception as e:
                     session.rollback()
                     QMessageBox.critical(self, "Error", f"Failed to delete requests: {str(e)}")
+
+class PendingRequestsDialog(QDialog):
+    """A unified dashboard for custodians to view and fulfill ALL pending requests."""
+    def __init__(self, mode="SATELLITE", parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.setWindowTitle("📦 Pending Deliveries Dashboard")
+        self.setMinimumSize(1000, 600)
+        
+        layout = QVBoxLayout(self)
+        
+        # Header
+        header = QHBoxLayout()
+        title = QLabel("Outstanding Supply Requests")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
+        header.addWidget(title)
+        
+        header.addStretch()
+        self.refresh_btn = QPushButton("🔄 Refresh List")
+        self.refresh_btn.clicked.connect(self.load_data)
+        header.addWidget(self.refresh_btn)
+        layout.addLayout(header)
+        
+        # Table
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels([
+            "Date", "Employee", "Department/Area", "Item Requested", "Qty", "Source", "Action", "ID"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnHidden(7, True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.table)
+        
+        footer = QHBoxLayout()
+        hint = QLabel("<i>Note: Fulfilling an item automatically deducts stock from the selected source.</i>")
+        footer.addWidget(hint)
+        footer.addStretch()
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.accept)
+        footer.addWidget(self.close_btn)
+        layout.addLayout(footer)
+        
+        self.load_data()
+
+    def load_data(self):
+        self.table.setRowCount(0)
+        with SessionLocal() as session:
+            # Query all PENDING request items for the current office mode
+            target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
+            
+            pending_items = session.query(RequestItem).join(SupplyRequest).join(Location, SupplyRequest.dest_location_id == Location.id).filter(
+                SupplyRequest.status == "PENDING",
+                Location.name == target_loc_name
+            ).options(
+                joinedload(RequestItem.item),
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.employee),
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department),
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.source_location)
+            ).order_by(SupplyRequest.request_date.desc()).all()
+            
+            for row_idx, ri in enumerate(pending_items):
+                self.table.insertRow(row_idx)
+                
+                date_str = ri.supply_request.request_date.strftime("%Y-%m-%d")
+                emp_name = ri.supply_request.employee.name
+                dept_area = f"{ri.supply_request.department.area_name}"
+                item_display = f"{ri.item.name} ({ri.item.description})" if ri.item.description else ri.item.name
+                
+                self.table.setItem(row_idx, 0, QTableWidgetItem(date_str))
+                self.table.setItem(row_idx, 1, QTableWidgetItem(emp_name))
+                self.table.setItem(row_idx, 2, QTableWidgetItem(dept_area))
+                self.table.setItem(row_idx, 3, QTableWidgetItem(item_display))
+                self.table.setItem(row_idx, 4, QTableWidgetItem(f"{ri.quantity:.2f}"))
+                self.table.setItem(row_idx, 5, QTableWidgetItem(ri.supply_request.source_location.name))
+                
+                # Fulfill Button
+                btn = QPushButton("Mark Fulfilled")
+                btn.setStyleSheet("background-color: #27ae60; color: white; border-radius: 4px; padding: 4px; font-weight: bold;")
+                btn.clicked.connect(lambda checked, item=ri: self.fulfill_item(item))
+                self.table.setCellWidget(row_idx, 6, btn)
+                
+                self.table.setItem(row_idx, 7, QTableWidgetItem(str(ri.id)))
+
+    def fulfill_item(self, ri):
+        """Standardized fulfillment logic with stock deduction."""
+        ans = QMessageBox.question(self, "Confirm Delivery", 
+                                 f"Deliver {ri.quantity} {ri.item.name} to {ri.supply_request.employee.name}?\n"
+                                 f"Source: {ri.supply_request.source_location.name}",
+                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if ans != QMessageBox.StandardButton.Yes: return
+
+        with SessionLocal() as session:
+            try:
+                # Fresh re-fetch
+                db_ri = session.query(RequestItem).options(
+                    joinedload(RequestItem.supply_request),
+                    joinedload(RequestItem.item)
+                ).get(ri.id)
+                
+                if db_ri.supply_request.status == "FULFILLED":
+                    QMessageBox.warning(self, "Conflict", "This request was already fulfilled by someone else.")
+                    self.load_data()
+                    return
+
+                # Stock Safeguard
+                src_id = db_ri.supply_request.source_location_id
+                item_id = db_ri.item_id
+                stock = session.query(Stock).filter_by(item_id=item_id, location_id=src_id).first()
+                
+                curr = stock.quantity if stock else 0.0
+                if curr < db_ri.quantity:
+                    QMessageBox.warning(self, "Insufficient Stock", 
+                                       f"Unable to fulfill: {db_ri.item.name} has only {curr:.2f} units available at {db_ri.supply_request.source_location.name}.\n\n"
+                                       "Please restock before finalizing this delivery.")
+                    return
+
+                # Process
+                if stock:
+                    stock.quantity -= db_ri.quantity
+                else:
+                    # Defensive
+                    new_stock = Stock(item_id=item_id, location_id=src_id, quantity=-db_ri.quantity)
+                    session.add(new_stock)
+
+                db_ri.supply_request.status = "FULFILLED"
+                session.commit()
+                
+                QMessageBox.information(self, "Shipped", f"Status updated to FULFILLED. {db_ri.quantity} units deducted from inventory.")
+                self.load_data()
+                if self.parent(): self.parent().refresh_table()
+                
+            except Exception as e:
+                session.rollback()
+                QMessageBox.critical(self, "Error", f"Failed to fulfill: {str(e)}")
 
 class UsageCard(QFrame):
     """A custom widget to visually display consumption stats for a single item."""
@@ -1109,7 +1227,6 @@ class ConsumptionReportDialog(QDialog):
                     r.supply_request.request_date.strftime("%Y-%m-%d"),
                     r.item.name,
                     r.quantity,
-                    "Yes" if r.is_refill_request else "No",
                     r.frequency or ""
                 ))
 
@@ -1216,24 +1333,20 @@ class RequestTrackingApp(QWidget):
         self.quantity_input.setValidator(validator)
         form_layout.addRow("Quantity:", self.quantity_input)
         
-        if self.mode == "SATELLITE":
-            self.area_input = QComboBox()
-            self.area_input.setEditable(True)
-            form_layout.addRow("Department Area:", self.area_input)
-            
-            self.shift_input = QLineEdit()
-            form_layout.addRow("Shift:", self.shift_input)
-            
-            self.supervisor_input = QLineEdit()
-            form_layout.addRow("Supervisor:", self.supervisor_input)
-            
-            self.is_refill_cb = QCheckBox("Is this a refill request?")
-            form_layout.addRow("", self.is_refill_cb)
-            
-            self.frequency_input = QComboBox()
-            self.frequency_input.setEditable(True)
-            self.frequency_input.addItems(["1 WEEK", "2 WEEKS", "ONCE A WEEK", "TWICE A WEEK", "1 MONTH", "ONCE A MONTH", "UNTIL DEFECTIVE", "REFILL"])
-            form_layout.addRow("Frequency:", self.frequency_input)
+        self.area_input = QComboBox()
+        self.area_input.setEditable(True)
+        form_layout.addRow("Department Area:", self.area_input)
+        
+        self.shift_input = QLineEdit()
+        form_layout.addRow("Shift:", self.shift_input)
+        
+        self.supervisor_input = QLineEdit()
+        form_layout.addRow("Supervisor:", self.supervisor_input)
+        
+        self.frequency_input = QComboBox()
+        self.frequency_input.setEditable(True)
+        self.frequency_input.addItems(["1 WEEK", "2 WEEKS", "ONCE A WEEK", "TWICE A WEEK", "1 MONTH", "ONCE A MONTH", "UNTIL DEFECTIVE", "REFILL"])
+        form_layout.addRow("Frequency:", self.frequency_input)
         
         self.source_loc_input = QComboBox()
         self.dest_loc_input = QComboBox()
@@ -1334,6 +1447,12 @@ class RequestTrackingApp(QWidget):
         self.delete_emp_btn.setStyleSheet("color: #c0392b; font-weight: bold;")
         
         btn_box.addWidget(self.delete_emp_btn)
+        
+        self.pending_btn = QPushButton("📦 Pending Deliveries")
+        self.pending_btn.clicked.connect(self.open_pending_deliveries)
+        self.pending_btn.setStyleSheet("background-color: #FFF9C4; font-weight: bold;")
+        btn_box.addWidget(self.pending_btn)
+
         btn_box.addWidget(self.export_btn)
         btn_box.addWidget(self.stats_btn)
         self.table_panel.addLayout(btn_box)
@@ -1416,12 +1535,10 @@ class RequestTrackingApp(QWidget):
         is_refill = False
         freq = "N/A"
         
-        if self.mode == "SATELLITE":
-            area = self.area_input.currentText().strip()
-            shift = self.shift_input.text().strip()
-            supervisor = self.supervisor_input.text().strip()
-            is_refill = self.is_refill_cb.isChecked()
-            freq = normalize_frequency(self.frequency_input.currentText().strip())
+        area = self.area_input.currentText().strip()
+        shift = self.shift_input.text().strip()
+        supervisor = self.supervisor_input.text().strip()
+        freq = normalize_frequency(self.frequency_input.currentText().strip())
 
         # Basic GUI-level validation
         if not emp_name or not qty_str or not item_name:
@@ -1490,7 +1607,6 @@ class RequestTrackingApp(QWidget):
                     request_id=new_request.id,
                     item_id=item.id,
                     quantity=qty_float,
-                    is_refill_request=is_refill,
                     frequency=freq
                 )
                 session.add(req_item)
@@ -1530,15 +1646,15 @@ class RequestTrackingApp(QWidget):
             self.item_name_input.setCurrentText("")
             self.item_name_input.blockSignals(False)
             
+            distinct_areas = session.query(Department.area_name).distinct().all()
+            self.area_input.blockSignals(True)
+            self.area_input.clear()
+            self.area_input.addItems([a[0] for a in distinct_areas if a[0]])
+            self.area_input.setCurrentText("")
+            self.area_input.blockSignals(False)
+            
+            # Also refresh Area Filter, but preserve 'ALL'
             if self.mode == "SATELLITE":
-                distinct_areas = session.query(Department.area_name).distinct().all()
-                self.area_input.blockSignals(True)
-                self.area_input.clear()
-                self.area_input.addItems([a[0] for a in distinct_areas if a[0]])
-                self.area_input.setCurrentText("")
-                self.area_input.blockSignals(False)
-                
-                # Also refresh Area Filter, but preserve 'ALL'
                 self.area_filter.blockSignals(True)
                 self.area_filter.clear()
                 self.area_filter.addItem("ALL")
@@ -1643,6 +1759,11 @@ class RequestTrackingApp(QWidget):
         dialog = ConsumptionReportDialog(mode=self.mode, parent=self)
         dialog.exec()
 
+    def open_pending_deliveries(self):
+        """Opens the custodian dashboard for fulfilling requests."""
+        dialog = PendingRequestsDialog(mode=self.mode, parent=self)
+        dialog.exec()
+
     def delete_selected_employee(self):
         """Removes selected employees and all their history after bulk confirmation."""
         # Get unique rows from selected items
@@ -1696,8 +1817,8 @@ class RequestTrackingApp(QWidget):
         self.item_name_input.setCurrentText("")
         self.quantity_input.clear()
         
-        if self.mode == "SATELLITE":
-            self.shift_input.clear()
+        self.shift_input.clear()
+        self.supervisor_input.clear()
 
     def filter_table(self):
         """Hides or shows rows based on search text."""

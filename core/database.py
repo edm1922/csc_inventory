@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, DateTime, ForeignKey, CheckConstraint
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, DateTime, ForeignKey, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, validates
 
 # Setup Database connection
@@ -48,7 +48,6 @@ class Item(Base):
     standard_stock = Column(Float, default=0.0)
     actual_stock = Column(Float, default=0.0)
     pending_order = Column(Float, default=0.0)
-    requires_refill = Column(Boolean, default=False, nullable=False)
     
     # Relationship to Supplier
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
@@ -104,7 +103,6 @@ class RequestItem(Base):
     request_id = Column(Integer, ForeignKey("supply_requests.id"), nullable=False)
     item_id = Column(Integer, ForeignKey("items.id"), nullable=False)
     quantity = Column(Float, nullable=False)
-    is_refill_request = Column(Boolean, default=False, nullable=False)
     frequency = Column(String, nullable=True)
 
     supply_request = relationship("SupplyRequest", back_populates="requested_items")
@@ -123,7 +121,7 @@ class RequestItem(Base):
 class PurchaseRequest(Base):
     __tablename__ = "purchase_requests"
     id = Column(Integer, primary_key=True, index=True)
-    pr_no = Column(String, unique=True, nullable=False)
+    pr_no = Column(String, nullable=False)
     request_date = Column(DateTime, default=datetime.utcnow, nullable=False)
     department = Column(String, nullable=False)
     end_user = Column(String, nullable=True)
@@ -133,6 +131,10 @@ class PurchaseRequest(Base):
     status = Column(String, default="PENDING")
 
     items = relationship("PurchaseItem", back_populates="purchase_request", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint('pr_no', 'request_date', name='uix_pr_no_date'),
+    )
 
 class PurchaseItem(Base):
     __tablename__ = "purchase_items"
@@ -147,6 +149,28 @@ class PurchaseItem(Base):
     total = Column(Float, default=0.0)
 
     purchase_request = relationship("PurchaseRequest", back_populates="items")
+
+class QuickPullLog(Base):
+    __tablename__ = "quick_pull_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    requested_by = Column(String, nullable=False)
+    purpose = Column(String, nullable=True)
+    destination = Column(String, nullable=True) # Company / Agency
+    source_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    
+    source_location = relationship("Location")
+    pulled_items = relationship("QuickPullItem", back_populates="quick_pull_log", cascade="all, delete-orphan")
+
+class QuickPullItem(Base):
+    __tablename__ = "quick_pull_items"
+    id = Column(Integer, primary_key=True, index=True)
+    log_id = Column(Integer, ForeignKey("quick_pull_logs.id"), nullable=False)
+    item_id = Column(Integer, ForeignKey("items.id"), nullable=False)
+    quantity = Column(Float, nullable=False)
+
+    quick_pull_log = relationship("QuickPullLog", back_populates="pulled_items")
+    item = relationship("Item")
 
 def parse_frequency(freq_str):
     """Converts frequency strings like '1 WEEK' or '1 MONTH' into a timedelta."""
@@ -266,18 +290,40 @@ def init_db():
             cursor.execute("UPDATE supply_requests SET status = 'OK' WHERE status = 'PENDING'")
         except sqlite3.OperationalError: pass
  
-        # Create Purchase Request Tables
+        # Create Quick Pull Tables
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS quick_pull_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATETIME NOT NULL,
+                requested_by TEXT NOT NULL,
+                purpose TEXT,
+                destination TEXT,
+                source_location_id INTEGER NOT NULL,
+                FOREIGN KEY(source_location_id) REFERENCES locations(id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS quick_pull_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_id INTEGER NOT NULL,
+                item_id INTEGER NOT NULL,
+                quantity REAL NOT NULL,
+                FOREIGN KEY(log_id) REFERENCES quick_pull_logs(id),
+                FOREIGN KEY(item_id) REFERENCES items(id)
+            )
+        """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS purchase_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pr_no TEXT UNIQUE NOT NULL,
+                pr_no TEXT NOT NULL,
                 request_date DATETIME,
                 department TEXT,
                 end_user TEXT,
                 position TEXT,
                 prepared_by TEXT,
                 approved_by TEXT,
-                status TEXT DEFAULT 'PENDING'
+                status TEXT DEFAULT 'PENDING',
+                UNIQUE(pr_no, request_date)
             )
         """)
         cursor.execute("""

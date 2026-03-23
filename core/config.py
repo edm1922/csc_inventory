@@ -26,11 +26,9 @@ def get_effective_threshold(unit, custom_threshold=0.0):
     unit = (unit or "").strip().upper()
     if unit in ["PCS", "PC", "PIECES"]:
         return t.get("pcs_threshold", 50.0), False
-    elif unit in ["BOX", "BOXES"]:
+    else:
+        # User wants this to apply to the rest of the unit except for PCS
         return t.get("box_threshold", 10.0), False
-        
-    # Default for unknown units if no custom threshold applied
-    return 0.0, False
 
 def evaluate_stock_status(unit, qty, custom_threshold=0.0):
     threshold, is_custom = get_effective_threshold(unit, custom_threshold)

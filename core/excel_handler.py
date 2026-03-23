@@ -112,29 +112,15 @@ def clean_and_import_sheet(db_session, sheet_name):
 
         active_request = request_map[employee.id]
 
-        # --- IDENTIFY ITEM AND REFILL STATUS ---
+        # --- IDENTIFY ITEM ---
         raw_supply = str(row['SUPPLIES']).strip().upper()
-        
-        is_refill = False
         item_name_clean = raw_supply
         
-        # Logic to convert separate 'REFILL' lines into constraints for the closest actual item
-        # Since Excel has a line for "BALLPEN" and then a line under it for "REFILL",
-        # if the item IS "REFILL", we assume it's for the last valid item parsed. 
-        # But this is dangerous without context, so we'll treat 'REFILL' as an item property.
-        if item_name_clean == 'REFILL':
-            is_refill = True
-            item_name_clean = "INK/PEN REFILL" # Normalizing for now
-            
         inventory_item = db_session.query(Item).filter_by(name=item_name_clean).first()
         if not inventory_item:
-            inventory_item = Item(name=item_name_clean, requires_refill=is_refill)
+            inventory_item = Item(name=item_name_clean)
             db_session.add(inventory_item)
             db_session.flush()
-        else:
-            # If we see a refill request, we update the item to note it CAN take refills
-            if is_refill and not inventory_item.requires_refill:
-                inventory_item.requires_refill = True
 
 
         # Clean Quantity (Default to 1 if blank, handle misspelled column header)
@@ -160,7 +146,6 @@ def clean_and_import_sheet(db_session, sheet_name):
             request_id=active_request.id,
             item_id=inventory_item.id,
             quantity=req_qty,
-            is_refill_request=is_refill,
             frequency=freq_str
         )
         db_session.add(req_item)

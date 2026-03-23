@@ -18,14 +18,14 @@ class FilteredReportDialog(QDialog):
         self.setMinimumSize(600, 400)
         
         self.current_location = current_location
-        self.layout = QVBoxLayout(self)
+        self.main_layout = QVBoxLayout(self)
         
         # Filter Selection
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(QLabel("Select Stock Category:"))
         
         self.category_cb = QComboBox()
-        self.category_cb.addItems(["Low Stock", "Needs Restock", "Healthy Stock", "ALL ALERTS (Low + Restock)"])
+        self.category_cb.addItems(["Low Stocks", "Needs Restock", "Healthy Stocks", "All Categories"])
         self.category_cb.setStyleSheet("""
             QComboBox { padding: 5px; border: 1px solid #bdc3c7; border-radius: 3px; background: white; color: black; }
         """)
@@ -33,20 +33,20 @@ class FilteredReportDialog(QDialog):
         filter_layout.addWidget(self.category_cb)
         
         filter_layout.addStretch()
-        self.layout.addLayout(filter_layout)
+        self.main_layout.addLayout(filter_layout)
         
         # Preview Table
         preview_label = QLabel("Report Preview:")
         preview_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        self.layout.addWidget(preview_label)
+        self.main_layout.addWidget(preview_label)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Item Name", "Quantity", "Unit", "Status", "Location"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Item Name", "Description", "Quantity", "Unit", "Status", "Location"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setStyleSheet("QTableWidget { background: white; color: black; }")
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.layout.addWidget(self.table)
+        self.main_layout.addWidget(self.table)
         
         # Buttons
         btn_layout = QHBoxLayout()
@@ -61,7 +61,7 @@ class FilteredReportDialog(QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(self.print_btn)
-        self.layout.addLayout(btn_layout)
+        self.main_layout.addLayout(btn_layout)
         
         self.report_data = []
         self.load_preview()
@@ -90,16 +90,21 @@ class FilteredReportDialog(QDialog):
                 
                 cat = evaluate_stock_status(unit, qty, item.standard_stock)
                 
-                # Filter logic
+                # Filter logic - normalized to match exact UI terms
                 match = False
-                if category == "ALL ALERTS (Low + Restock)":
-                    match = cat in ["Low Stock", "Needs Restock"]
-                else:
-                    match = (cat == category)
+                if category == "All Categories":
+                    match = True
+                elif category == "Low Stocks" and cat == "Low Stock":
+                    match = True
+                elif category == "Needs Restock" and cat == "Needs Restock":
+                    match = True
+                elif category == "Healthy Stocks" and cat == "Healthy Stock":
+                    match = True
                     
                 if match:
                     self.report_data.append({
                         "name": name,
+                        "description": item.description or "",
                         "qty": qty,
                         "unit": unit,
                         "status": cat,
@@ -115,10 +120,11 @@ class FilteredReportDialog(QDialog):
         self.table.setRowCount(len(self.report_data))
         for row, data in enumerate(self.report_data):
             self.table.setItem(row, 0, QTableWidgetItem(data["name"]))
-            self.table.setItem(row, 1, QTableWidgetItem(f"{data['qty']:.2f}"))
-            self.table.setItem(row, 2, QTableWidgetItem(data["unit"]))
-            self.table.setItem(row, 3, QTableWidgetItem(data["status"]))
-            self.table.setItem(row, 4, QTableWidgetItem(data["location"]))
+            self.table.setItem(row, 1, QTableWidgetItem(data["description"]))
+            self.table.setItem(row, 2, QTableWidgetItem(f"{data['qty']:.2f}"))
+            self.table.setItem(row, 3, QTableWidgetItem(data["unit"]))
+            self.table.setItem(row, 4, QTableWidgetItem(data["status"]))
+            self.table.setItem(row, 5, QTableWidgetItem(data["location"]))
             
         if not self.report_data:
             self.print_btn.setEnabled(False)
@@ -156,27 +162,29 @@ class FilteredReportDialog(QDialog):
             <h1>📦 Inventory Status Report</h1>
             <h3>Filtered Category: {category}</h3>
             <table>
+                <thead>
                 <tr>
                     <th>Item Name</th>
+                    <th>Description</th>
                     <th>Quantity</th>
                     <th>Unit</th>
                     <th>Status</th>
                     <th>Location</th>
                 </tr>
+                </thead>
+                <tbody>
         """
         
-        for d in self.report_data:
-            status_class = "status-Healthy"
-            if "Needs" in d["status"]: status_class = "status-Needs"
-            elif "Low" in d["status"]: status_class = "status-Low"
-            
+        for item in self.report_data:
+            color = "#e67e22" if item['status'] == "Low Stock" else ("#c0392b" if item['status'] == "Needs Restock" else "#27ae60")
             html += f"""
                 <tr>
-                    <td>{d["name"]}</td>
-                    <td><b>{d["qty"]:.2f}</b></td>
-                    <td>{d["unit"]}</td>
-                    <td class="{status_class}">{d["status"]}</td>
-                    <td>{d["location"]}</td>
+                    <td>{item['name']}</td>
+                    <td>{item['description']}</td>
+                    <td>{item['qty']:.2f}</td>
+                    <td>{item['unit']}</td>
+                    <td style="color: {color}; font-weight: bold;">{item['status']}</td>
+                    <td>{item['location']}</td>
                 </tr>
             """
             

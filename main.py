@@ -16,26 +16,27 @@ from request_main import RequestTrackingApp
 from inventory_main import InventoryManager
 from purchase_main import PurchaseManager
 from dashboard_main import SmartDashboard
+from quick_pull_main import QuickPullManager
 from database import init_db
 
 class MainMenu(QWidget):
     def __init__(self, parent_window):
         super().__init__()
         self.parent_window = parent_window
-        self.layout = QVBoxLayout(self)
-        self.layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.layout.setSpacing(30)
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.main_layout.setSpacing(30)
         
         # Header
         header = QLabel("SUPPLY & INVENTORY SYSTEM")
         header.setStyleSheet("font-size: 32px; font-weight: bold; color: #1F4E78; margin-bottom: 20px;")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.layout.addWidget(header)
+        self.main_layout.addWidget(header)
         
         subheader = QLabel("Select a module to continue")
         subheader.setStyleSheet("font-size: 18px; color: #555; margin-bottom: 40px;")
         subheader.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.layout.addWidget(subheader)
+        self.main_layout.addWidget(subheader)
         
         # Buttons Layout
         btn_layout = QHBoxLayout()
@@ -63,7 +64,7 @@ class MainMenu(QWidget):
         # 3. Inventory Button
         self.inventory_btn = self.create_menu_button(
             "📋", "Inventory Manager", 
-            "Manage stock levels, thresholds, and suppliers.",
+            "Manage stock levels and thresholds.",
             "#27ae60"
         )
         self.inventory_btn.clicked.connect(lambda: self.parent_window.switch_view(3))
@@ -78,13 +79,22 @@ class MainMenu(QWidget):
         self.purchase_btn.clicked.connect(lambda: self.parent_window.switch_view(4))
         btn_layout.addWidget(self.purchase_btn)
         
-        self.layout.addLayout(btn_layout)
+        # 5. Quick Pull Button (NEW)
+        self.pull_btn = self.create_menu_button(
+            "⚡", "Quick Pull Log", 
+            "Fast item release log with auto-deduction.",
+            "#d35400"
+        )
+        self.pull_btn.clicked.connect(lambda: self.parent_window.switch_view(2))
+        btn_layout.addWidget(self.pull_btn)
+        
+        self.main_layout.addLayout(btn_layout)
         
         # Footer
         footer = QLabel("System v2.0 - Developed for Inventory Efficiency")
         footer.setStyleSheet("margin-top: 50px; color: #888; font-size: 12px;")
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.layout.addWidget(footer)
+        self.main_layout.addWidget(footer)
 
     def create_menu_button(self, icon_char, title, description, color):
         btn = QPushButton()
@@ -137,17 +147,19 @@ class MainWindow(QMainWindow):
         self.unified_request_view = RequestTrackingApp(mode="UNIFIED")
         self.inventory_view = InventoryManager()
         self.purchase_view = PurchaseManager()
+        self.quick_pull_view = QuickPullManager()
         self.smart_view = SmartDashboard()
         
         # Add a "Back to Menu" button to the sub-views
         self.add_nav_bar(self.unified_request_view)
         self.add_nav_bar(self.inventory_view)
         self.add_nav_bar(self.purchase_view)
+        self.add_nav_bar(self.quick_pull_view)
         self.add_nav_bar(self.smart_view)
         
         self.stack.addWidget(self.menu_view)               # 0
         self.stack.addWidget(self.unified_request_view)    # 1
-        self.stack.addWidget(QWidget())                    # 2 (Placeholder)
+        self.stack.addWidget(self.quick_pull_view)         # 2
         self.stack.addWidget(self.inventory_view)          # 3
         self.stack.addWidget(self.purchase_view)           # 4
         self.stack.addWidget(self.smart_view)              # 5
@@ -179,6 +191,8 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(index)
         if index == 1:
             self.unified_request_view.refresh_table()
+        elif index == 2:
+            self.quick_pull_view.load_logs()
         elif index == 3:
             self.inventory_view.load_data()
         elif index == 4:

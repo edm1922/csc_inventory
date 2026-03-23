@@ -1,14 +1,64 @@
 import sys
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
                              QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, 
-                             QHeaderView, QGroupBox, QFormLayout, QDialog, QComboBox, QAbstractItemView)
+                             QHeaderView, QGroupBox, QFormLayout, QDialog, QComboBox, QAbstractItemView,
+                             QMenu)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QDoubleValidator
+from PyQt6.QtGui import QDoubleValidator, QColor
 
-from database import SessionLocal, Item, Supplier, Location, Stock
+from core.database import SessionLocal, Item, Supplier, Location, Stock
+from core.config import get_thresholds, save_thresholds, get_effective_threshold
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func
-from exporter import generate_inventory_checklist
+from exporter import generate_inventory_checklist, generate_stock_confirmation_word
+
+class ThresholdSettingsDialog(QDialog):
+    """Dialog to edit global stock threshold settings."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Global Threshold Settings")
+        self.setMinimumWidth(300)
+        
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        
+        self.pcs_input = QLineEdit()
+        self.pcs_input.setValidator(QDoubleValidator(0.0, 10000.0, 2))
+        
+        self.box_input = QLineEdit()
+        self.box_input.setValidator(QDoubleValidator(0.0, 10000.0, 2))
+        
+        form.addRow("Default Pieces (PCS) Threshold:", self.pcs_input)
+        form.addRow("Default for Other Units (BOX, ROLL, etc.):", self.box_input)
+        
+        layout.addLayout(form)
+        
+        # Load current values
+        t = get_thresholds()
+        self.pcs_input.setText(str(t.get("pcs_threshold", 50.0)))
+        self.box_input.setText(str(t.get("box_threshold", 10.0)))
+        
+        btns = QHBoxLayout()
+        save_btn = QPushButton("Save Defaults")
+        save_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        save_btn.clicked.connect(self.save_settings)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        btns.addWidget(save_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+        
+    def save_settings(self):
+        try:
+            pcs = float(self.pcs_input.text() or 50.0)
+            box = float(self.box_input.text() or 10.0)
+            if pcs < 0 or box < 0:
+                raise ValueError("Thresholds must be positive.")
+            save_thresholds(pcs, box)
+            self.accept()
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Input", str(e))
 
 class EditItemDialog(QDialog):
     """Dialog to add or edit an inventory item and its supplier."""
@@ -31,26 +81,26 @@ class EditItemDialog(QDialog):
         self.price_input = QLineEdit()
         self.price_input.setValidator(QDoubleValidator(0.0, 100000.0, 2))
         
-        self.std_stock_input = QLineEdit()
-        self.std_stock_input.setValidator(QDoubleValidator(0.0, 10000.0, 2))
+        self.threshold_input = QLineEdit()
+        self.threshold_input.setValidator(QDoubleValidator(0.0, 10000.0, 2))
+        self.threshold_input.setPlaceholderText("0.00 for Default")
         
         self.act_stock_input = QLineEdit()
         self.act_stock_input.setValidator(QDoubleValidator(0.0, 10000.0, 2))
         
         self.pending_input = QLineEdit()
-        self.pending_input.setValidator(QDoubleValidator(0.0, 10000.0, 2))
+        # Non-editable, calculated
+        self.pending_input.setReadOnly(True)
+        self.pending_input.setStyleSheet("background-color: #f0f0f0; color: #555;")
         
-        # Supplier Details
-        self.supplier_input = QComboBox()
-        self.supplier_input.setEditable(True)
-        self.contact_person_input = QLineEdit()
-        self.contact_number_input = QLineEdit()
-        self.address_input = QLineEdit()
-        self.payment_mode_input = QComboBox()
-        self.payment_mode_input.setEditable(True)
-        self.payment_mode_input.addItems(["CASH", "CHECK", "COD", "TERMS", "GCASH"])
+        # Threshold Hint
+        self.threshold_hint = QLabel("Using Global Default")
+        self.threshold_hint.setStyleSheet("color: #7f8c8d; font-size: 11px; font-style: italic;")
         
-        self.payment_mode_input.addItems(["CASH", "CHECK", "COD", "TERMS", "GCASH"])
+        # Connect signals for automatic calculation
+        self.threshold_input.textChanged.connect(self.update_pending_order)
+        self.act_stock_input.textChanged.connect(self.update_pending_order)
+        self.unit_input.currentTextChanged.connect(self.update_pending_order)
         
         # Location Selection
         self.location_input = QComboBox()
@@ -60,16 +110,11 @@ class EditItemDialog(QDialog):
         form.addRow("Description:", self.desc_input)
         form.addRow("Unit:", self.unit_input)
         form.addRow("Price:", self.price_input)
-        form.addRow("Standard Stock:", self.std_stock_input)
+        form.addRow("Threshold (Override):", self.threshold_input)
+        form.addRow("", self.threshold_hint)
         form.addRow("Actual Stock:", self.act_stock_input)
         form.addRow("Location for Stock:", self.location_input)
-        form.addRow("Pending Order:", self.pending_input)
-        form.addRow("-- Supplier Details --", QLabel(""))
-        form.addRow("Company Name:", self.supplier_input)
-        form.addRow("Contact Person:", self.contact_person_input)
-        form.addRow("Contact #:", self.contact_number_input)
-        form.addRow("Address:", self.address_input)
-        form.addRow("Payment Mode:", self.payment_mode_input)
+        form.addRow("Pending Order (Auto):", self.pending_input)
         
         layout.addLayout(form)
         
@@ -82,15 +127,28 @@ class EditItemDialog(QDialog):
         btns.addWidget(self.cancel_btn)
         layout.addLayout(btns)
         
-        self.load_suppliers()
         self.load_locations()
         if self.item_id:
             self.load_item_data()
 
-    def load_suppliers(self):
-        with SessionLocal() as session:
-            suppliers = session.query(Supplier.company_name).all()
-            self.supplier_input.addItems([s[0] for s in suppliers])
+    def update_pending_order(self):
+        try:
+            custom_t = float(self.threshold_input.text() or 0.0)
+            unit = self.unit_input.currentText()
+            effective_t, is_custom = get_effective_threshold(unit, custom_t)
+            
+            if is_custom:
+                self.threshold_hint.setText(f"Custom Override Active: {effective_t}")
+                self.threshold_hint.setStyleSheet("color: #e67e22; font-size: 11px; font-weight: bold;")
+            else:
+                self.threshold_hint.setText(f"Using Global Default: {effective_t}")
+                self.threshold_hint.setStyleSheet("color: #7f8c8d; font-size: 11px; font-style: italic;")
+            
+            actual = float(self.act_stock_input.text() or 0.0)
+            pending = max(0.0, effective_t - actual)
+            self.pending_input.setText(f"{pending:.2f}")
+        except ValueError:
+            self.pending_input.setText("0.00")
 
     def load_locations(self):
         with SessionLocal() as session:
@@ -106,19 +164,13 @@ class EditItemDialog(QDialog):
                 self.desc_input.setText(item.description or "")
                 self.unit_input.setCurrentText(item.unit or "")
                 self.price_input.setText(str(item.price))
-                self.std_stock_input.setText(str(item.standard_stock))
-                self.pending_input.setText(str(item.pending_order))
+                self.threshold_input.setText(str(item.standard_stock))
+                # Initial pending update call though textChanged will trigger it
+                self.update_pending_order()
                 
                 # Load stock for the currently selected location in dialog
                 self.update_stock_display()
                 self.location_input.currentIndexChanged.connect(self.update_stock_display)
-                
-                if item.supplier:
-                    self.supplier_input.setCurrentText(item.supplier.company_name)
-                    self.contact_person_input.setText(item.supplier.contact_person or "")
-                    self.contact_number_input.setText(item.supplier.contact_number or "")
-                    self.address_input.setText(item.supplier.address or "")
-                    self.payment_mode_input.setCurrentText(item.supplier.payment_mode or "")
 
     def update_stock_display(self):
         if not self.item_id: return
@@ -133,15 +185,10 @@ class EditItemDialog(QDialog):
             "description": self.desc_input.text().strip().upper(),
             "unit": self.unit_input.currentText().strip().upper(),
             "price": float(self.price_input.text() or 0.0),
-            "std_stock": float(self.std_stock_input.text() or 0.0),
+            "threshold": float(self.threshold_input.text() or 0.0),
             "act_stock": float(self.act_stock_input.text() or 0.0),
             "location_id": self.location_input.currentData(),
-            "pending": float(self.pending_input.text() or 0.0),
-            "supplier": self.supplier_input.currentText().strip(),
-            "contact_person": self.contact_person_input.text().strip(),
-            "contact_number": self.contact_number_input.text().strip(),
-            "address": self.address_input.text().strip(),
-            "payment_mode": self.payment_mode_input.currentText().strip()
+            "pending": float(self.pending_input.text() or 0.0)
         }
 
 
@@ -175,15 +222,20 @@ class InventoryManager(QWidget):
         self.add_btn.clicked.connect(self.add_item)
         filter_layout.addWidget(self.add_btn)
         
-        self.print_btn = QPushButton("📋 Print Checklist")
-        self.print_btn.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold;")
-        self.print_btn.clicked.connect(self.print_checklist)
+        self.print_btn = QPushButton("🖨️ Print / Export")
+        self.print_btn.setStyleSheet("padding: 8px; background-color: #2980b9; color: white; font-weight: bold; border-radius: 4px;")
+        self.print_btn.clicked.connect(self.open_print_menu)
         filter_layout.addWidget(self.print_btn)
         
         self.delete_btn = QPushButton("🗑 Delete Selected")
         self.delete_btn.setStyleSheet("background-color: #c0392b; color: white;")
         self.delete_btn.clicked.connect(self.delete_selected_item)
         filter_layout.addWidget(self.delete_btn)
+        
+        self.settings_btn = QPushButton("⚙️ Thresholds")
+        self.settings_btn.setStyleSheet("background-color: #7f8c8d; color: white; font-weight: bold;")
+        self.settings_btn.clicked.connect(self.open_threshold_settings)
+        filter_layout.addWidget(self.settings_btn)
         
         self.main_layout.addLayout(filter_layout)
         
@@ -192,7 +244,7 @@ class InventoryManager(QWidget):
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "Item", "Description", "Unit", "Price", 
-            "Standard", "Actual", "Location", "ID"
+            "Threshold", "Actual", "Location", "ID"
         ])
         self.table.setColumnHidden(7, True) # ID column
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -244,13 +296,22 @@ class InventoryManager(QWidget):
             self.table.setRowCount(len(display_rows))
             
             for i, (item, stock_qty, loc_name) in enumerate(display_rows):
-                lacking = max(0.0, item.standard_stock - stock_qty)
+                eff_threshold, is_custom = get_effective_threshold(item.unit, item.standard_stock)
                 
                 self.table.setItem(i, 0, QTableWidgetItem(item.name))
                 self.table.setItem(i, 1, QTableWidgetItem(item.description or ""))
                 self.table.setItem(i, 2, QTableWidgetItem(item.unit or ""))
                 self.table.setItem(i, 3, QTableWidgetItem(f"P{item.price:.2f}"))
-                self.table.setItem(i, 4, QTableWidgetItem(str(item.standard_stock)))
+                
+                t_item = QTableWidgetItem(f"{eff_threshold} {'(C)' if is_custom else '(D)'}")
+                if is_custom:
+                    t_item.setForeground(QColor("#e67e22"))
+                    t_item.setToolTip("Custom Threshold Override")
+                else:
+                    t_item.setForeground(QColor("#7f8c8d"))
+                    t_item.setToolTip("System Default Threshold")
+                
+                self.table.setItem(i, 4, t_item)
                 self.table.setItem(i, 5, QTableWidgetItem(str(stock_qty)))
                 self.table.setItem(i, 6, QTableWidgetItem(loc_name))
                 self.table.setItem(i, 7, QTableWidgetItem(str(item.id)))
@@ -291,24 +352,8 @@ class InventoryManager(QWidget):
     def save_item(self, item_id, data):
         with SessionLocal() as session:
             try:
-                # Get or Create Supplier
-                supplier = session.query(Supplier).filter_by(company_name=data["supplier"]).first()
-                if not supplier and data["supplier"]:
-                    supplier = Supplier(
-                        company_name=data["supplier"],
-                        contact_person=data["contact_person"],
-                        contact_number=data["contact_number"],
-                        address=data["address"],
-                        payment_mode=data["payment_mode"]
-                    )
-                    session.add(supplier)
-                    session.flush()
-                elif supplier:
-                    # Update existing supplier details
-                    supplier.contact_person = data["contact_person"]
-                    supplier.contact_number = data["contact_number"]
-                    supplier.address = data["address"]
-                    supplier.payment_mode = data["payment_mode"]
+                # Supplier handling removed from UI, keeping simplified logic
+                supplier = None
                 
                 if item_id:
                     item = session.query(Item).get(item_id)
@@ -352,10 +397,8 @@ class InventoryManager(QWidget):
                 item.description = data["description"]
                 item.unit = data["unit"]
                 item.price = data["price"]
-                item.standard_stock = data["std_stock"]
+                item.standard_stock = data["threshold"]
                 item.pending_order = data["pending"]
-                if not item.supplier_id: # Only set if not already set or update if needed
-                    item.supplier_id = supplier.id if supplier else None
                 
                 # Update stock for specific location
                 session.flush() # Ensure we have item.id (especially for brand new items)
@@ -374,6 +417,11 @@ class InventoryManager(QWidget):
             except Exception as e:
                 session.rollback()
                 QMessageBox.critical(self, "Error", f"Failed to save item: {str(e)}")
+
+    def open_threshold_settings(self):
+        dialog = ThresholdSettingsDialog(self)
+        if dialog.exec():
+            self.load_data() # Refresh table to show new defaults if applicable
 
     def delete_selected_item(self):
         selected_rows = self.table.selectionModel().selectedRows()
@@ -409,37 +457,84 @@ class InventoryManager(QWidget):
                     session.rollback()
                     QMessageBox.critical(self, "Error", f"Failed to delete items: {str(e)}")
 
-    def print_checklist(self):
-        """Generates an Excel checklist of the currently VISIBLE items in the table."""
-        if self.table.rowCount() == 0:
-            QMessageBox.warning(self, "No Data", "There is no data to print.")
+    def open_print_menu(self):
+        """Shows a menu to choose between Excel checklist or Word report."""
+        menu = QMenu(self)
+        excel_action = menu.addAction("📊 Excel (Checklist)")
+        word_action = menu.addAction("📄 Word (Confirmation Report)")
+        
+        # Style the menu slightly
+        menu.setStyleSheet("""
+            QMenu { background-color: white; border: 1px solid #bdc3c7; }
+            QMenu::item { padding: 8px 25px; color: black; }
+            QMenu::item:selected { background-color: #3498db; color: white; }
+        """)
+        
+        # Position the menu below the button
+        action = menu.exec(self.print_btn.mapToGlobal(self.print_btn.rect().bottomLeft()))
+        
+        if action == excel_action:
+            self.export_selected("excel")
+        elif action == word_action:
+            self.export_selected("word")
+
+    def export_selected(self, format_type):
+        """Processes selection and generates the requested document."""
+        selected_ranges = self.table.selectedRanges()
+        if not selected_ranges:
+            QMessageBox.warning(self, "No Selection", "Please select items in the table to print.")
             return
-            
+
+        # Gather selected row indices
+        selected_rows = set()
+        for r in selected_ranges:
+            for row in range(r.topRow(), r.bottomRow() + 1):
+                selected_rows.add(row)
+
         data_rows = []
-        for row in range(self.table.rowCount()):
+        for row in sorted(list(selected_rows)):
             if self.table.isRowHidden(row):
                 continue
                 
-            # Columns: Item(0), Standard(4), Price(3), Actual(5)
-            # We treat "0.0" and "P0.00" as blank for a cleaner manual checklist
-            std_val = self.table.item(row, 4).text()
-            price_val = self.table.item(row, 3).text()
+            item_name = self.table.item(row, 0).text()
+            unit = self.table.item(row, 2).text()
+            price_text = self.table.item(row, 3).text().replace('P', '').replace(',', '')
+            # Extract threshold value from string like "10.0 (D)"
+            threshold_text = self.table.item(row, 4).text().split(' ')[0]
+            actual = self.table.item(row, 5).text()
+            location = self.table.item(row, 6).text()
             
             data_rows.append({
-                "Item": self.table.item(row, 0).text(),
-                "Standard": std_val if std_val != "0.0" else "",
-                "Price": price_val if price_val != "P0.00" else "",
-                "Actual": "" # Leave blank for manual pen entry as requested
+                "Item": item_name,
+                "Threshold": threshold_text,
+                "Actual": float(actual) if actual else 0.0,
+                "Price": float(price_text) if price_text else 0.0,
+                "Unit": unit,
+                "Location": location
             })
-            
+
         if not data_rows:
-            QMessageBox.warning(self, "No Data", "No items match your current filters.")
+            QMessageBox.warning(self, "No Data", "No visible data found in selection.")
             return
-            
+
+        location_name = self.location_filter.currentText()
+        
         try:
-            loc_name = self.location_filter.currentText()
-            filename = generate_inventory_checklist(data_rows, loc_name)
-            QMessageBox.information(self, "Success", f"Inventory checklist generated:\n{filename}")
+            if format_type == "excel":
+                filename = generate_inventory_checklist(data_rows, location_name)
+                msg = f"Excel Checklist generated: {filename}"
+            else:
+                filename = generate_stock_confirmation_word(data_rows, location_name)
+                msg = f"Word Confirmation Report generated: {filename}"
+            
+            # Open the file automatically
+            import os
+            os.startfile(filename) if sys.platform == "win32" else None
+            QMessageBox.information(self, "Success", f"{msg}\nOpening file...")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to generate checklist:\n{str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to generate report: {e}")
+
+    def print_checklist(self):
+        # Redirect to the new menu
+        self.open_print_menu()
 
