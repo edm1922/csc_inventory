@@ -9,7 +9,8 @@ import os
 import webbrowser
 
 from core.database import SessionLocal, Item, Stock, Location
-from core.config import evaluate_stock_status
+from core.config import evaluate_stock_status, get_effective_threshold
+from core.excel_generator import generate_excel_report
 
 class FilteredReportDialog(QDialog):
     def __init__(self, current_location, parent=None):
@@ -25,7 +26,7 @@ class FilteredReportDialog(QDialog):
         filter_layout.addWidget(QLabel("Select Stock Category:"))
         
         self.category_cb = QComboBox()
-        self.category_cb.addItems(["Low Stocks", "Needs Restock", "Healthy Stocks", "All Categories"])
+        self.category_cb.addItems(["Need Restock", "Stock Sufficient", "All Categories"])
         self.category_cb.setStyleSheet("""
             QComboBox { padding: 5px; border: 1px solid #bdc3c7; border-radius: 3px; background: white; color: black; }
         """)
@@ -42,7 +43,7 @@ class FilteredReportDialog(QDialog):
         
         self.table = QTableWidget()
         self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["Item Name", "Description", "Quantity", "Unit", "Status", "Location"])
+        self.table.setHorizontalHeaderLabels(["Item Name", "Description", "Quantity", "Unit", "Threshold", "Location"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setStyleSheet("QTableWidget { background: white; color: black; }")
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -50,9 +51,13 @@ class FilteredReportDialog(QDialog):
         
         # Buttons
         btn_layout = QHBoxLayout()
-        self.print_btn = QPushButton("🖨️ Print / Export PDF (Browser)")
-        self.print_btn.setStyleSheet("padding: 8px; background-color: #2980b9; color: white; font-weight: bold; border-radius: 4px;")
-        self.print_btn.clicked.connect(self.generate_report)
+        self.print_btn = QPushButton("📊 Generate Excel Report")
+        self.print_btn.setStyleSheet("padding: 8px; background-color: #27ae60; color: white; font-weight: bold; border-radius: 4px;")
+        self.print_btn.clicked.connect(self.generate_excel)
+        
+        self.html_btn = QPushButton("📄 Preview HTML")
+        self.html_btn.setStyleSheet("padding: 8px; background-color: #2980b9; color: white; font-weight: bold; border-radius: 4px;")
+        self.html_btn.clicked.connect(self.generate_html_report)
         
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
@@ -60,6 +65,7 @@ class FilteredReportDialog(QDialog):
         
         btn_layout.addStretch()
         btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(self.html_btn)
         btn_layout.addWidget(self.print_btn)
         self.main_layout.addLayout(btn_layout)
         
@@ -78,9 +84,8 @@ class FilteredReportDialog(QDialog):
             self.report_data = []
             
             for st in stocks:
-                # If we meant to restrict to dashboard location, uncomment the next lines:
-                # if self.current_location != "ALL LOCATIONS" and st.location.name != self.current_location:
-                #     continue
+                if self.current_location != "ALL LOCATIONS" and st.location.name != self.current_location:
+                    continue
                 
                 item = st.item
                 qty = st.quantity
@@ -94,11 +99,9 @@ class FilteredReportDialog(QDialog):
                 match = False
                 if category == "All Categories":
                     match = True
-                elif category == "Low Stocks" and cat == "Low Stock":
+                elif category == "Need Restock" and cat == "Need Restock":
                     match = True
-                elif category == "Needs Restock" and cat == "Needs Restock":
-                    match = True
-                elif category == "Healthy Stocks" and cat == "Healthy Stock":
+                elif category == "Stock Sufficient" and cat == "Stock Sufficient":
                     match = True
                     
                 if match:
@@ -107,6 +110,7 @@ class FilteredReportDialog(QDialog):
                         "description": item.description or "",
                         "qty": qty,
                         "unit": unit,
+                        "threshold": get_effective_threshold(unit, item.standard_stock)[0],
                         "status": cat,
                         "location": loc_name
                     })
@@ -123,7 +127,7 @@ class FilteredReportDialog(QDialog):
             self.table.setItem(row, 1, QTableWidgetItem(data["description"]))
             self.table.setItem(row, 2, QTableWidgetItem(f"{data['qty']:.2f}"))
             self.table.setItem(row, 3, QTableWidgetItem(data["unit"]))
-            self.table.setItem(row, 4, QTableWidgetItem(data["status"]))
+            self.table.setItem(row, 4, QTableWidgetItem(f"{data['threshold']:.2f}"))
             self.table.setItem(row, 5, QTableWidgetItem(data["location"]))
             
         if not self.report_data:
@@ -131,9 +135,9 @@ class FilteredReportDialog(QDialog):
             self.print_btn.setText("No items match filter")
         else:
             self.print_btn.setEnabled(True)
-            self.print_btn.setText("🖨️ Print / Export PDF")
+            self.print_btn.setText("📊 Generate Excel Report")
             
-    def generate_report(self):
+    def generate_html_report(self):
         if not self.report_data:
             QMessageBox.information(self, "No Data", "There is no data to generate a report.")
             return
@@ -153,9 +157,8 @@ class FilteredReportDialog(QDialog):
                 th, td {{ border: 1px solid #bdc3c7; padding: 12px; text-align: left; }}
                 th {{ background-color: #ecf0f1; color: #2c3e50; font-weight: bold; }}
                 tr:nth-child(even) {{ background-color: #f9f9f9; }}
-                .status-Needs {{ color: #e74c3c; font-weight: bold; }}
-                .status-Low {{ color: #f39c12; font-weight: bold; }}
-                .status-Healthy {{ color: #27ae60; font-weight: bold; }}
+                .status-Restock {{ color: #e74c3c; font-weight: bold; }}
+                .status-Sufficient {{ color: #27ae60; font-weight: bold; }}
             </style>
         </head>
         <body>
@@ -168,7 +171,7 @@ class FilteredReportDialog(QDialog):
                     <th>Description</th>
                     <th>Quantity</th>
                     <th>Unit</th>
-                    <th>Status</th>
+                    <th>Threshold</th>
                     <th>Location</th>
                 </tr>
                 </thead>
@@ -176,14 +179,14 @@ class FilteredReportDialog(QDialog):
         """
         
         for item in self.report_data:
-            color = "#e67e22" if item['status'] == "Low Stock" else ("#c0392b" if item['status'] == "Needs Restock" else "#27ae60")
+            color = "#c0392b" if item['status'] == "Need Restock" else "#27ae60"
             html += f"""
                 <tr>
                     <td>{item['name']}</td>
                     <td>{item['description']}</td>
                     <td>{item['qty']:.2f}</td>
                     <td>{item['unit']}</td>
-                    <td style="color: {color}; font-weight: bold;">{item['status']}</td>
+                    <td style="color: {color}; font-weight: bold;">{item['threshold']:.2f}</td>
                     <td>{item['location']}</td>
                 </tr>
             """
@@ -207,6 +210,28 @@ class FilteredReportDialog(QDialog):
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to generate report: {e}")
+
+    def generate_excel(self):
+        if not self.report_data:
+            QMessageBox.information(self, "No Data", "There is no data to export.")
+            return
+
+        headers = ["Item Name", "Description", "Quantity", "Unit", "Threshold", "Location", "Status"]
+        data = []
+        for item in self.report_data:
+            data.append([
+                item["name"], item["description"], item["qty"], 
+                item["unit"], item["threshold"], item["location"], item["status"]
+            ])
+
+        try:
+            filename = f"inventory_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            filepath = generate_excel_report("Inventory Report", headers, data, filename)
+            os.startfile(filepath)
+            QMessageBox.information(self, "Success", f"Excel report generated: {filename}")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to generate Excel: {e}")
 
 class PieChart(QFrame):
     def __init__(self):
@@ -381,7 +406,10 @@ class SmartDashboard(QWidget):
         header_layout.addStretch()
         
         self.loc_cb = QComboBox()
-        self.loc_cb.addItems(["MAIN OFFICE", "WAREHOUSE"])
+        
+        with SessionLocal() as db:
+            locations = [loc.name for loc in db.query(Location).order_by(Location.name).all()]
+        self.loc_cb.addItems(locations + ["ALL LOCATIONS"])
         self.loc_cb.setStyleSheet("""
             QComboBox {
                 padding: 8px;
@@ -428,13 +456,11 @@ class SmartDashboard(QWidget):
         # Cards
         cards_layout = QHBoxLayout()
         self.total_card = HighlightCard("Total Items", 0, "#34495e")
-        self.healthy_card = HighlightCard("Healthy Stock", 0, "#2ecc71")
-        self.low_card = HighlightCard("Low Stock", 0, "#f1c40f")
-        self.restock_card = HighlightCard("Needs Restock", 0, "#e74c3c")
+        self.healthy_card = HighlightCard("Stock Sufficient", 0, "#2ecc71")
+        self.restock_card = HighlightCard("Need Restock", 0, "#e74c3c")
         
         cards_layout.addWidget(self.total_card)
         cards_layout.addWidget(self.healthy_card)
-        cards_layout.addWidget(self.low_card)
         cards_layout.addWidget(self.restock_card)
         cards_layout.addStretch()
         self.main_layout.addLayout(cards_layout)
@@ -526,14 +552,15 @@ class SmartDashboard(QWidget):
         loc_name = self.loc_cb.currentText()
         db = SessionLocal()
         try:
-            loc = db.query(Location).filter(Location.name == loc_name).first()
-            if not loc:
-                return
-                
-            stocks = db.query(Stock).filter(Stock.location_id == loc.id).all()
+            if loc_name == "ALL LOCATIONS":
+                stocks = db.query(Stock).all()
+            else:
+                loc = db.query(Location).filter(Location.name == loc_name).first()
+                if not loc:
+                    return
+                stocks = db.query(Stock).filter(Stock.location_id == loc.id).all()
             
             healthy = 0
-            low = 0
             restock = 0
             total = len(stocks)
             
@@ -547,23 +574,18 @@ class SmartDashboard(QWidget):
                 
                 cat = evaluate_stock_status(unit, qty, item.standard_stock)
                 
-                if cat == "Healthy Stock":
+                if cat == "Stock Sufficient":
                     healthy += 1
-                elif cat == "Low Stock":
-                    low += 1
-                    flagged_items.append((name, unit, qty, cat, "⚠️", "#f1c40f")) # Yellow
-                elif cat == "Needs Restock":
+                elif cat == "Need Restock":
                     restock += 1
                     flagged_items.append((name, unit, qty, cat, "❗", "#e74c3c")) # Red
                     
             self.total_card.update_value(total)
             self.healthy_card.update_value(healthy)
-            self.low_card.update_value(low)
             self.restock_card.update_value(restock)
             
             chart_data = []
-            if healthy > 0: chart_data.append((healthy, "#2ecc71", "Healthy"))
-            if low > 0: chart_data.append((low, "#f1c40f", "Low"))
+            if healthy > 0: chart_data.append((healthy, "#2ecc71", "Sufficient"))
             if restock > 0: chart_data.append((restock, "#e74c3c", "Restock"))
             
             self.pie_chart.set_data(chart_data)

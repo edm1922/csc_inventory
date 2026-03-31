@@ -2,15 +2,18 @@ import sys
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
                              QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, 
                              QHeaderView, QGroupBox, QFormLayout, QDialog, QComboBox, QAbstractItemView,
-                             QMenu)
+                             QMenu, QListWidget)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDoubleValidator, QColor
 
-from core.database import SessionLocal, Item, Supplier, Location, Stock
+from core.database import SessionLocal, Item, Supplier, Location, Stock, InventoryActionLog
 from core.config import get_thresholds, save_thresholds, get_effective_threshold
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func
 from exporter import generate_inventory_checklist, generate_stock_confirmation_word
+from core.excel_generator import generate_excel_report
+from datetime import datetime
+import os
 
 class ThresholdSettingsDialog(QDialog):
     """Dialog to edit global stock threshold settings."""
@@ -94,7 +97,7 @@ class EditItemDialog(QDialog):
         self.pending_input.setStyleSheet("background-color: #f0f0f0; color: #555;")
         
         # Threshold Hint
-        self.threshold_hint = QLabel("Using Global Default")
+        self.threshold_hint = QLabel("Needs Restock when stock ≤ 50% of threshold")
         self.threshold_hint.setStyleSheet("color: #7f8c8d; font-size: 11px; font-style: italic;")
         
         # Connect signals for automatic calculation
@@ -138,10 +141,10 @@ class EditItemDialog(QDialog):
             effective_t, is_custom = get_effective_threshold(unit, custom_t)
             
             if is_custom:
-                self.threshold_hint.setText(f"Custom Override Active: {effective_t}")
+                self.threshold_hint.setText(f"Custom Override: {effective_t} (Restock at {effective_t/2:.1f})")
                 self.threshold_hint.setStyleSheet("color: #e67e22; font-size: 11px; font-weight: bold;")
             else:
-                self.threshold_hint.setText(f"Using Global Default: {effective_t}")
+                self.threshold_hint.setText(f"Global Default: {effective_t} (Restock at {effective_t/2:.1f})")
                 self.threshold_hint.setStyleSheet("color: #7f8c8d; font-size: 11px; font-style: italic;")
             
             actual = float(self.act_stock_input.text() or 0.0)
@@ -192,6 +195,121 @@ class EditItemDialog(QDialog):
         }
 
 
+class LocationManagerDialog(QDialog):
+    """Dialog to manage inventory locations."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Locations")
+        self.setMinimumSize(400, 350)
+        
+        layout = QVBoxLayout(self)
+        
+        # Add New Location Section
+        add_group = QGroupBox("Add New Location")
+        add_layout = QHBoxLayout(add_group)
+        self.new_loc_input = QLineEdit()
+        self.new_loc_input.setPlaceholderText("Enter location name...")
+        self.add_btn = QPushButton("Add")
+        self.add_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        self.add_btn.clicked.connect(self.add_location)
+        add_layout.addWidget(self.new_loc_input)
+        add_layout.addWidget(self.add_btn)
+        layout.addWidget(add_group)
+        
+        # Existing Locations List
+        layout.addWidget(QLabel("Existing Locations:"))
+        self.loc_list = QListWidget()
+        self.loc_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        layout.addWidget(self.loc_list)
+        
+        # Action Buttons
+        btn_layout = QHBoxLayout()
+        self.edit_btn = QPushButton("Edit Selected")
+        self.edit_btn.clicked.connect(self.edit_location)
+        self.delete_btn = QPushButton("Delete Selected")
+        self.delete_btn.setStyleSheet("background-color: #c0392b; color: white;")
+        self.delete_btn.clicked.connect(self.delete_location)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.accept)
+        
+        btn_layout.addWidget(self.edit_btn)
+        btn_layout.addWidget(self.delete_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.close_btn)
+        layout.addLayout(btn_layout)
+        
+        self.load_locations()
+        
+    def load_locations(self):
+        self.loc_list.clear()
+        with SessionLocal() as session:
+            locations = session.query(Location).order_by(Location.name).all()
+            for loc in locations:
+                self.loc_list.addItem(loc.name)
+                
+    def add_location(self):
+        name = self.new_loc_input.text().strip().title()
+        if not name:
+            QMessageBox.warning(self, "Invalid Input", "Location name cannot be empty.")
+            return
+            
+        with SessionLocal() as session:
+            existing = session.query(Location).filter(func.lower(Location.name) == name.lower()).first()
+            if existing:
+                QMessageBox.warning(self, "Duplicate", f"Location '{name}' already exists.")
+                return
+                
+            new_loc = Location(name=name)
+            session.add(new_loc)
+            session.commit()
+            self.new_loc_input.clear()
+            self.load_locations()
+            
+    def edit_location(self):
+        item = self.loc_list.currentItem()
+        if not item: return
+        
+        old_name = item.text()
+        from PyQt6.QtWidgets import QInputDialog
+        new_name, ok = QInputDialog.getText(self, "Edit Location", "Update location name:", text=old_name)
+        
+        if ok and new_name.strip():
+            new_name = new_name.strip().title()
+            with SessionLocal() as session:
+                loc = session.query(Location).filter_by(name=old_name).first()
+                if loc:
+                    # Check if new name already exists elsewhere
+                    existing = session.query(Location).filter(func.lower(Location.name) == new_name.lower(), Location.id != loc.id).first()
+                    if existing:
+                        QMessageBox.warning(self, "Duplicate", f"Location '{new_name}' already exists.")
+                        return
+                    loc.name = new_name
+                    session.commit()
+                    self.load_locations()
+                    
+    def delete_location(self):
+        item = self.loc_list.currentItem()
+        if not item: return
+        
+        name = item.text()
+        reply = QMessageBox.question(self, "Confirm Delete", 
+                                   f"Are you sure you want to delete '{name}'?\n\n"
+                                   "This will fail if any stock is associated with this location.",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            with SessionLocal() as session:
+                loc = session.query(Location).filter_by(name=name).first()
+                if loc:
+                    # Check for dependencies
+                    if loc.stocks:
+                        QMessageBox.warning(self, "Action Denied", "Cannot delete location with existing stock. Remove all items from this location first.")
+                        return
+                    session.delete(loc)
+                    session.commit()
+                    self.load_locations()
+
+
 class InventoryManager(QWidget):
     """Main Inventory Management view."""
     def __init__(self, parent=None):
@@ -237,6 +355,11 @@ class InventoryManager(QWidget):
         self.settings_btn.clicked.connect(self.open_threshold_settings)
         filter_layout.addWidget(self.settings_btn)
         
+        self.manage_loc_btn = QPushButton("📍 Manage Locations")
+        self.manage_loc_btn.setStyleSheet("background-color: #34495e; color: white; font-weight: bold;")
+        self.manage_loc_btn.clicked.connect(self.open_location_manager)
+        filter_layout.addWidget(self.manage_loc_btn)
+        
         self.main_layout.addLayout(filter_layout)
         
         # Table
@@ -256,10 +379,20 @@ class InventoryManager(QWidget):
         self.load_data()
 
     def load_filter_locations(self):
+        current_data = self.location_filter.currentData()
+        self.location_filter.blockSignals(True)
+        self.location_filter.clear()
+        self.location_filter.addItem("ALL LOCATIONS", None)
         with SessionLocal() as session:
-            locations = session.query(Location).all()
+            locations = session.query(Location).order_by(Location.name).all()
             for loc in locations:
                 self.location_filter.addItem(loc.name, loc.id)
+        
+        # Restore selection
+        index = self.location_filter.findData(current_data)
+        if index >= 0:
+            self.location_filter.setCurrentIndex(index)
+        self.location_filter.blockSignals(False)
 
     def load_data(self):
         search = self.search_input.text().strip().upper()
@@ -404,13 +537,42 @@ class InventoryManager(QWidget):
                 session.flush() # Ensure we have item.id (especially for brand new items)
                 
                 stock = session.query(Stock).filter_by(item_id=item.id, location_id=loc_id).first()
+                loc_name = session.query(Location.name).filter_by(id=loc_id).scalar() or "Unknown"
+                
                 if not stock:
                      # Create new stock record for this location
                      stock = Stock(item_id=item.id, location_id=loc_id, quantity=data["act_stock"])
                      session.add(stock)
+                     # LOG ADDED
+                     log = InventoryActionLog(
+                         item_name=item.name,
+                         action_type="ADDED",
+                         details=f"Initial Qty: {data['act_stock']} at {loc_name}"
+                     )
+                     session.add(log)
                 else:
                     # Update existing stock for this location
-                    stock.quantity = data["act_stock"]
+                    old_qty = stock.quantity
+                    new_qty = data["act_stock"]
+                    stock.quantity = new_qty
+                    
+                    # LOG UPDATED (if qty changed or if item was JUST created but stock existed?)
+                    # Actually, if we're here, it's an update.
+                    if old_qty != new_qty:
+                        log = InventoryActionLog(
+                            item_name=item.name,
+                            action_type="UPDATED",
+                            details=f"Qty: {old_qty} -> {new_qty} at {loc_name}"
+                        )
+                        session.add(log)
+                    else:
+                        # General update (price, threshold etc)
+                        log = InventoryActionLog(
+                            item_name=item.name,
+                            action_type="UPDATED",
+                            details=f"Item details updated at {loc_name}"
+                        )
+                        session.add(log)
 
                 session.commit()
                 self.load_data()
@@ -448,6 +610,13 @@ class InventoryManager(QWidget):
                         item_id = int(self.table.item(row_proxy.row(), 7).text())
                         item = session.query(Item).get(item_id)
                         if item:
+                            # LOG REMOVED
+                            log = InventoryActionLog(
+                                item_name=item.name,
+                                action_type="REMOVED",
+                                details="Item and all linked stock removed"
+                            )
+                            session.add(log)
                             session.delete(item)
                     
                     session.commit()
@@ -457,11 +626,19 @@ class InventoryManager(QWidget):
                     session.rollback()
                     QMessageBox.critical(self, "Error", f"Failed to delete items: {str(e)}")
 
+    def open_location_manager(self):
+        dialog = LocationManagerDialog(self)
+        if dialog.exec():
+            # Refresh all location dropdowns in this module
+            self.load_filter_locations()
+            self.load_data()
+
     def open_print_menu(self):
         """Shows a menu to choose between Excel checklist or Word report."""
         menu = QMenu(self)
         excel_action = menu.addAction("📊 Excel (Checklist)")
         word_action = menu.addAction("📄 Word (Confirmation Report)")
+        raw_excel_action = menu.addAction("📈 Raw Excel Export")
         
         # Style the menu slightly
         menu.setStyleSheet("""
@@ -477,6 +654,8 @@ class InventoryManager(QWidget):
             self.export_selected("excel")
         elif action == word_action:
             self.export_selected("word")
+        elif action == raw_excel_action:
+            self.export_selected("raw_excel")
 
     def export_selected(self, format_type):
         """Processes selection and generates the requested document."""
@@ -523,9 +702,24 @@ class InventoryManager(QWidget):
             if format_type == "excel":
                 filename = generate_inventory_checklist(data_rows, location_name)
                 msg = f"Excel Checklist generated: {filename}"
-            else:
+            elif format_type == "word":
                 filename = generate_stock_confirmation_word(data_rows, location_name)
                 msg = f"Word Confirmation Report generated: {filename}"
+            else:
+                # Raw Excel Export using new utility
+                headers = ["Item Name", "Description", "Unit", "Price", "Threshold", "Actual Stock", "Location"]
+                raw_data = [[r["Item"], "", r["Unit"], r["Price"], r["Threshold"], r["Actual"], r["Location"]] for r in data_rows]
+                # Note: table_data above needs to match data_rows structure
+                # Let's fix the raw_data mapping
+                raw_data = []
+                for r in data_rows:
+                    raw_data.append([r["Item"], "", r["Unit"], r["Price"], r["Threshold"], r["Actual"], r["Location"]])
+                
+                filename = f"inventory_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                filepath = generate_excel_report("Inventory Export", headers, raw_data, filename)
+                os.startfile(filepath)
+                QMessageBox.information(self, "Success", f"Excel export generated: {filename}")
+                return
             
             # Open the file automatically
             import os
