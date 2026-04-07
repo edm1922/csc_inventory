@@ -31,19 +31,15 @@ def get_effective_threshold(unit, custom_threshold=0.0):
         return t.get("box_threshold", 10.0), False
 
 def evaluate_stock_status(unit, qty, custom_threshold=0.0):
-    threshold, is_custom = get_effective_threshold(unit, custom_threshold)
+    """
+    Standardized Logic:
+    1. stock < (threshold * 0.5) -> Need Restock
+    2. Else -> Stock Sufficient
+    """
+    threshold, _ = get_effective_threshold(unit, custom_threshold)
     
-    if qty <= 0:
-        return "Needs Restock"
-        
-    if threshold > 0 and qty < threshold:
-        unit = (unit or "").strip().upper()
-        if is_custom:
-            # Custom thresholds default to "Low Stock" warning
-            return "Low Stock"
-        else:
-            if unit in ["PCS", "PC", "PIECES"]:
-                return "Needs Restock"
-            return "Low Stock"
+    if threshold > 0:
+        if qty < (threshold * 0.5):
+            return "Need Restock"
             
-    return "Healthy Stock"
+    return "Stock Sufficient"

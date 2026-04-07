@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTableWidgetItem, QMessageBox, QHeaderView, QGroupBox, QFormLayout, 
                              QDialog, QDateEdit, QListWidget, QScrollArea, QFrame, QProgressBar,
                              QDialogButtonBox)
-from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtCore import Qt, QDate, QTimer
 from PyQt6.QtGui import QIntValidator, QDoubleValidator, QColor, QBrush
 
 # Import backend logic
@@ -15,6 +15,236 @@ from form_generator import generate_blank_form, generate_populated_report, gener
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func
 from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
+from core.google_sync_service import GoogleSyncService, parse_item_requested
+
+# Load environment variables
+load_dotenv()
+
+class GoogleSyncInboxDialog(QDialog):
+    """Inbox to review and approve incoming Google Form requests."""
+    def __init__(self, mode="SATELLITE", parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.setWindowTitle("📥 Google Forms Request Inbox")
+        self.setMinimumSize(900, 500)
+        
+        self.layout = QVBoxLayout(self)
+        
+        # URL Input
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("Google Sheet URL:"))
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("Paste your Responses Sheet URL here...")
+        # Load from .env if available
+        default_url = os.getenv("GOOGLE_SHEET_URL", "")
+        self.url_input.setText(default_url)
+        url_layout.addWidget(self.url_input)
+        
+        self.sync_btn = QPushButton("Check for New Requests")
+        self.sync_btn.clicked.connect(self.sync_from_google)
+        url_layout.addWidget(self.sync_btn)
+        self.layout.addLayout(url_layout)
+        
+        # Table
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels([
+            "Timestamp", "Employee", "Department", "Item & Qty", "Source", "Action", "Status"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.layout.addWidget(self.table)
+        
+        self.status_label = QLabel("Ready to sync.")
+        self.layout.addWidget(self.status_label)
+        
+        self.pending_responses = []
+
+    def sync_from_google(self):
+        url = self.url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Missing URL", "Please paste the Google Sheet URL first.")
+            return
+            
+        self.status_label.setText("Syncing... please wait.")
+        self.sync_btn.setEnabled(False)
+        QApplication.processEvents()
+        
+        try:
+            # Credentials path - using the one identified in the project
+            creds_path = "inventorysync-491902-c629689ef8ea.json"
+            service = GoogleSyncService(creds_path)
+            service.connect_to_sheet(url)
+            self.pending_responses = service.fetch_new_responses()
+            
+            self.display_responses()
+            self.status_label.setText(f"Found {len(self.pending_responses)} new requests.")
+        except Exception as e:
+            QMessageBox.critical(self, "Sync Error", f"Failed to connect to Google Sheets:\n{str(e)}")
+            self.status_label.setText("Sync failed.")
+        finally:
+            self.sync_btn.setEnabled(True)
+
+    def display_responses(self):
+        self.table.setRowCount(0)
+        
+        def find_val(row_dict, *keys):
+            """Flexible header matching."""
+            for k in row_dict.keys():
+                for search_key in keys:
+                    if search_key.lower() in k.lower():
+                        return row_dict[k]
+            return "N/A"
+
+        for idx, row in enumerate(self.pending_responses):
+            self.table.insertRow(idx)
+            
+            # Use flexible matching for the specific headers in the user's screenshot
+            timestamp = find_val(row, "Timestamp")
+            emp_name = find_val(row, "Employee Name")
+            dept = find_val(row, "Department Area")
+            item_text = find_val(row, "Item Requested")
+            
+            self.table.setItem(idx, 0, QTableWidgetItem(str(timestamp)))
+            self.table.setItem(idx, 1, QTableWidgetItem(str(emp_name)))
+            self.table.setItem(idx, 2, QTableWidgetItem(str(dept)))
+            self.table.setItem(idx, 3, QTableWidgetItem(str(item_text)))
+            
+            # Source Location Dropdown
+            source_combo = QComboBox()
+            with SessionLocal() as session:
+                locations = session.query(Location).all()
+                for loc in locations:
+                    source_combo.addItem(loc.name, loc.id)
+                # Default to Warehouse if found
+                w_idx = source_combo.findText("WAREHOUSE")
+                if w_idx >= 0: source_combo.setCurrentIndex(w_idx)
+            self.table.setCellWidget(idx, 4, source_combo)
+            
+            # Approve Button
+            approve_btn = QPushButton("✅ Approve")
+            approve_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+            approve_btn.clicked.connect(lambda checked, r=row, i=idx, cb=source_combo: self.approve_request(r, i, cb))
+            self.table.setCellWidget(idx, 5, approve_btn)
+            
+            self.table.setItem(idx, 6, QTableWidgetItem("Waiting review"))
+
+    def approve_request(self, row_data, table_row, source_combo):
+        """Commits the form data to the actual database."""
+        try:
+            source_id = source_combo.currentData()
+            def find_val(row_dict, *keys):
+                for k in row_dict.keys():
+                    for search_key in keys:
+                        if search_key.lower() in k.lower():
+                            return row_dict[k]
+                return ""
+
+            # Split Item Requested into individual items
+            full_item_text = str(find_val(row_data, "Item Requested")).strip()
+            # Split by comma or semicolon
+            raw_items = [i.strip() for i in full_item_text.replace(";", ",").split(",") if i.strip()]
+            
+            # Map Other Fields from screenshot
+            emp_name = str(find_val(row_data, "Employee Name")).strip()
+            role_val = str(find_val(row_data, "Employee Role")).strip()
+            area = str(find_val(row_data, "Department Area")).strip()
+            supervisor = str(find_val(row_data, "Supervisor")).strip()
+            shift_val = str(find_val(row_data, "Shift")).strip()
+            
+            if not emp_name or emp_name == "N/A":
+                QMessageBox.warning(self, "Invalid Data", "Could not find Employee Name in this row.")
+                return
+
+            with SessionLocal() as session:
+                # 1. Get or Create Employee
+                emp = session.query(Employee).filter(func.upper(Employee.name) == emp_name.upper()).first()
+                if not emp:
+                    emp = Employee(name=emp_name, role=role_val)
+                    session.add(emp)
+                    session.flush()
+                
+                # 2. Get or Create Department
+                dept = session.query(Department).filter_by(area_name=area, role=role_val, supervisor=supervisor, shift=shift_val).first()
+                if not dept:
+                    dept = Department(area_name=area, role=role_val, supervisor=supervisor, shift=shift_val)
+                    session.add(dept)
+                    session.flush()
+                
+                # 3. Determine destination Location
+                target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
+                dest = session.query(Location).filter(func.upper(Location.name) == target_loc_name).first()
+                if not dest: dest = session.query(Location).filter(Location.id != source_id).first()
+
+                # 4. Create one Supply Request Header for the entire row
+                new_req = SupplyRequest(
+                    employee_id=emp.id,
+                    department_id=dept.id,
+                    request_date=datetime.now(),
+                    source_location_id=source_id,
+                    dest_location_id=dest.id if dest else None,
+                    status="PENDING"
+                )
+                session.add(new_req)
+                session.flush()
+                
+                # 5. Process each item in the comma-separated list
+                created_count = 0
+                for raw_item_str in raw_items:
+                    item_name_raw, qty = parse_item_requested(raw_item_str)
+                    
+                    # Fuzzy match item name
+                    # 1. Try exact match
+                    item_obj = session.query(Item).filter(func.upper(Item.name) == item_name_raw.upper()).first()
+                    # 2. Try partial match if no exact match (e.g. "Ballpen" matches "BALLPEN (HBW)")
+                    if not item_obj:
+                        item_obj = session.query(Item).filter(Item.name.ilike(f"%{item_name_raw}%")).first()
+                    
+                    # 3. Create if still not found
+                    if not item_obj:
+                        item_obj = Item(name=item_name_raw.upper())
+                        session.add(item_obj)
+                        session.flush()
+                    
+                    # Create Request Item
+                    ri = RequestItem(
+                        request_id=new_req.id,
+                        item_id=item_obj.id,
+                        quantity=qty,
+                        is_refill_request=False,
+                        frequency="N/A"
+                    )
+                    session.add(ri)
+                    created_count += 1
+                
+                if created_count == 0:
+                    session.rollback()
+                    QMessageBox.warning(self, "No Items", "No valid items found in the 'Item Requested' field.")
+                    return
+                    
+                session.commit()
+                
+            # 7. Mark as synced in Google Sheet
+            sheet_url = self.url_input.text().strip()
+            row_idx = row_data.get('sheet_row_index')
+            if sheet_url and row_idx:
+                try:
+                    creds_path = "inventorysync-491902-c629689ef8ea.json"
+                    service = GoogleSyncService(creds_path)
+                    service.connect_to_sheet(sheet_url)
+                    service.mark_as_synced(row_idx)
+                except Exception as sync_err:
+                    print(f"Sync write-back failed: {sync_err}")
+
+            # Update UI
+            self.table.item(table_row, 6).setText("✅ APPROVED")
+            self.table.item(table_row, 6).setForeground(QColor("green"))
+            self.table.cellWidget(table_row, 5).setEnabled(False)
+            source_combo.setEnabled(False)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to approve request: {str(e)}")
 
 class EditRequestItemDialog(QDialog):
     """A dialog to edit all fields of a specific request item."""
@@ -238,14 +468,13 @@ class EmployeeDetailsDialog(QDialog):
         layout.addWidget(self.table)
         
         btn_row = QHBoxLayout()
-        self.add_btn = QPushButton("Add New Item")
+        self.add_btn = QPushButton("&Add New Item")
         self.add_btn.clicked.connect(self.add_new_request_item)
         self.add_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
         
-
-        self.edit_btn = QPushButton("Edit Selected Request")
+        self.edit_btn = QPushButton("&Edit Selected Request")
         self.edit_btn.clicked.connect(self.edit_selected_request)
-        self.delete_btn = QPushButton("Delete Selected")
+        self.delete_btn = QPushButton("&Delete Selected")
         self.delete_btn.clicked.connect(self.delete_selected_request)
         self.delete_btn.setStyleSheet("color: #c0392b; font-weight: bold;")
         
@@ -254,7 +483,7 @@ class EmployeeDetailsDialog(QDialog):
         btn_row.addWidget(self.delete_btn)
         layout.addLayout(btn_row)
 
-        self.print_btn = QPushButton("Export/Print History to Excel")
+        self.print_btn = QPushButton("&Export/Print History to Excel")
         self.print_btn.clicked.connect(self.run_print_history)
         layout.addWidget(self.print_btn)
         
@@ -375,6 +604,8 @@ class EmployeeDetailsDialog(QDialog):
                 if req.supply_request.status == "FULFILLED":
                     status_btn.setStyleSheet("background-color: #c8e6c9; color: #2e7d32; font-weight: bold; border-radius: 4px;")
                     status_btn.setEnabled(False) # Locked once fulfilled
+                else:
+                    status_btn.clicked.connect(lambda checked, r=req: self.mark_as_fulfilled(r))
                 self.table.setCellWidget(row_idx, 7, status_btn)
                 
                 # Set Request ID in Hidden Column (index 8)
@@ -494,18 +725,48 @@ class EmployeeDetailsDialog(QDialog):
         with SessionLocal() as session:
             try:
                 req_item = session.query(RequestItem).options(
-                    joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department)
+                    joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department),
+                    joinedload(RequestItem.supply_request).joinedload(SupplyRequest.employee)
                 ).get(request_item_id)
                 
                 if not req_item: return
 
-                if col == 1: # Role
-                    req_item.supply_request.department.role = new_val
-                elif col == 2: # Area
-                    # Update the department name for this request
-                    req_item.supply_request.department.area_name = new_val
-                elif col == 3: # Shift
-                    req_item.supply_request.department.shift = new_val
+                if col in [1, 2, 3]: # Metadata (Role, Area, Shift)
+                    # Current values from the linked department
+                    role = req_item.supply_request.department.role
+                    area = req_item.supply_request.department.area_name
+                    shift = req_item.supply_request.department.shift
+                    supervisor = req_item.supply_request.department.supervisor
+                    
+                    if col == 1: 
+                        role = new_val
+                        # Also update the Master Employee Record for this employee
+                        if req_item.supply_request.employee:
+                            req_item.supply_request.employee.role = new_val
+                    elif col == 2: 
+                        area = new_val
+                    elif col == 3: 
+                        shift = new_val
+                    
+                    # Find or Create Department (to avoid affecting other employees sharing this group)
+                    new_dept = session.query(Department).filter_by(
+                        role=role,
+                        area_name=area,
+                        shift=shift,
+                        supervisor=supervisor
+                    ).first()
+                    
+                    if not new_dept:
+                        new_dept = Department(
+                            role=role,
+                            area_name=area,
+                            shift=shift,
+                            supervisor=supervisor
+                        )
+                        session.add(new_dept)
+                        session.flush()
+                    
+                    req_item.supply_request.department = new_dept
                 elif col == 5: # Qty
                     try:
                         req_item.quantity = float(new_val)
@@ -648,6 +909,7 @@ class EmployeeDetailsDialog(QDialog):
                         req_item.quantity = data["qty"]
                         
                         req_item.frequency = data["freq"]
+                        req_item.is_refill_request = data.get("refill", False)
                         
                         session.commit()
                         self.load_data()
@@ -666,7 +928,7 @@ class EmployeeDetailsDialog(QDialog):
                 try:
                     # 1. Find or Create Employee by Name
                     new_name = data["name"]
-                    emp = session.query(Employee).filter_by(name=new_name).first()
+                    emp = session.query(Employee).filter(func.upper(Employee.name) == new_name.upper()).first()
                     if not emp:
                         emp = Employee(name=new_name, role=data["role"])
                         session.add(emp)
@@ -719,7 +981,8 @@ class EmployeeDetailsDialog(QDialog):
                         request_id=supply_req.id,
                         item_id=item_obj.id,
                         quantity=data["qty"],
-                        frequency=data["freq"]
+                        frequency=data["freq"],
+                        is_refill_request=data.get("refill", False)
                     )
                     session.add(req_item)
                     
@@ -1354,10 +1617,12 @@ class RequestTrackingApp(QWidget):
         form_layout.addRow("Requesting Office:", self.dest_loc_input)
 
         # Buttons
-        self.submit_btn = QPushButton("Submit Request")
+        self.submit_btn = QPushButton("&Submit Request")
+        self.submit_btn.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold; padding: 8px;")
         self.submit_btn.clicked.connect(self.submit_request)
+        self.submit_btn.setDefault(True)
         
-        self.clear_btn = QPushButton("Clear Form")
+        self.clear_btn = QPushButton("&Clear Form")
         self.clear_btn.clicked.connect(self.clear_form)
         
         btn_layout = QHBoxLayout()
@@ -1371,16 +1636,22 @@ class RequestTrackingApp(QWidget):
         self.input_panel.addStretch()
         
         self.main_layout.addLayout(self.input_panel, 1) # 1 part width
-
+        
     def setup_table_panel(self):
-        """Creates the data table on the right side of the window."""
+        """Creates the search bar and results table on the right side."""
         self.table_panel = QVBoxLayout()
+
+        # Search Debounce Timer
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(300)
+        self.search_timer.timeout.connect(self.run_search)
         
         # Filter Bar Layout        # Filters
         top_filter_layout = QHBoxLayout()
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search Employee Name or Role...")
-        self.search_bar.textChanged.connect(self.run_search)
+        self.search_bar.textChanged.connect(self.search_timer.start)
         top_filter_layout.addWidget(self.search_bar)
         
         self.table_panel.addLayout(top_filter_layout)
@@ -1390,15 +1661,17 @@ class RequestTrackingApp(QWidget):
         self.start_date_filter = QDateEdit()
         self.start_date_filter.setCalendarPopup(True)
         self.start_date_filter.setDate(QDate.currentDate().addYears(-1))
-        self.start_date_filter.dateChanged.connect(self.refresh_table)
         bottom_filter_layout.addWidget(self.start_date_filter)
         
         bottom_filter_layout.addWidget(QLabel("To:"))
         self.end_date_filter = QDateEdit()
         self.end_date_filter.setCalendarPopup(True)
         self.end_date_filter.setDate(QDate.currentDate())
-        self.end_date_filter.dateChanged.connect(self.refresh_table)
         bottom_filter_layout.addWidget(self.end_date_filter)
+        
+        self.apply_btn = QPushButton("Apply Filter")
+        self.apply_btn.clicked.connect(self.refresh_table)
+        bottom_filter_layout.addWidget(self.apply_btn)
 
         if self.mode == "SATELLITE":
             bottom_filter_layout.addWidget(QLabel("Area:"))
@@ -1419,10 +1692,14 @@ class RequestTrackingApp(QWidget):
         hint.setTextFormat(Qt.TextFormat.RichText)
         self.table_panel.addWidget(hint)
         
+        self.status_lbl = QLabel("Ready")
+        self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 5px;")
+        self.table_panel.addWidget(self.status_lbl)
+        
         self.table = QTableWidget()
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels([
-            "ID", "Employee Name", "Role"
+            "ID", "Employee Name", "No. of issuance"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers) # Make read-only
@@ -1433,10 +1710,6 @@ class RequestTrackingApp(QWidget):
         self.export_btn.clicked.connect(self.run_export)
         self.export_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
         
-        btn_text = "📝 Total Requested Log" if self.mode == "MAIN_OFFICE" else "📊 View Consumption/Usage Report"
-        self.stats_btn = QPushButton(btn_text)
-        self.stats_btn.clicked.connect(self.open_consumption_report)
-        self.stats_btn.setStyleSheet("background-color: #E1F5FE; font-weight: bold;")
         
         self.table_panel.addWidget(self.table)
         
@@ -1448,13 +1721,18 @@ class RequestTrackingApp(QWidget):
         
         btn_box.addWidget(self.delete_emp_btn)
         
-        self.pending_btn = QPushButton("📦 Pending Deliveries")
-        self.pending_btn.clicked.connect(self.open_pending_deliveries)
-        self.pending_btn.setStyleSheet("background-color: #FFF9C4; font-weight: bold;")
-        btn_box.addWidget(self.pending_btn)
+        self.record_log_btn = QPushButton("📖 Record Issuance Log")
+        self.record_log_btn.clicked.connect(self.run_issuance_log)
+        self.record_log_btn.setStyleSheet("background-color: #8e44ad; color: white; font-weight: bold;")
+        btn_box.addWidget(self.record_log_btn)
+
+        
+        self.google_inbox_btn = QPushButton("📥 Google Forms Inbox")
+        self.google_inbox_btn.clicked.connect(self.open_google_inbox)
+        self.google_inbox_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
+        btn_box.addWidget(self.google_inbox_btn)
 
         btn_box.addWidget(self.export_btn)
-        btn_box.addWidget(self.stats_btn)
         self.table_panel.addLayout(btn_box)
         
         self.main_layout.addLayout(self.table_panel, 3) # 3 parts width
@@ -1462,23 +1740,36 @@ class RequestTrackingApp(QWidget):
     def load_dropdowns(self):
         """Pre-fills dropdowns with data already in the database."""
         with SessionLocal() as session:
-            locations = session.query(Location).all()
+            locations = session.query(Location).order_by(Location.name).all()
+            
+            # Refresh source locations
+            current_source = self.source_loc_input.currentData()
+            self.source_loc_input.blockSignals(True)
+            self.source_loc_input.clear()
             for loc in locations:
                 self.source_loc_input.addItem(loc.name, loc.id)
-                self.dest_loc_input.addItem(loc.name, loc.id)
-                
-            # Determine target location based on mode
-            target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
-
-            # Default logic for new requests
-            w_idx = self.source_loc_input.findText("WAREHOUSE")
-            if w_idx >= 0: self.source_loc_input.setCurrentIndex(w_idx)
             
-            m_idx = self.dest_loc_input.findText(target_loc_name)
-            if m_idx >= 0: 
-                self.dest_loc_input.setCurrentIndex(m_idx)
-                # Lock the destination location to prevent cross-contamination
-                self.dest_loc_input.setEnabled(False)
+            idx = self.source_loc_input.findData(current_source)
+            if idx >= 0: self.source_loc_input.setCurrentIndex(idx)
+            else:
+                w_idx = self.source_loc_input.findText("WAREHOUSE")
+                if w_idx >= 0: self.source_loc_input.setCurrentIndex(w_idx)
+            self.source_loc_input.blockSignals(False)
+
+            # Refresh dest locations
+            current_dest = self.dest_loc_input.currentData()
+            self.dest_loc_input.blockSignals(True)
+            self.dest_loc_input.clear()
+            for loc in locations:
+                self.dest_loc_input.addItem(loc.name, loc.id)
+            
+            idx = self.dest_loc_input.findData(current_dest)
+            if idx >= 0: self.dest_loc_input.setCurrentIndex(idx)
+            else:
+                target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
+                m_idx = self.dest_loc_input.findText(target_loc_name)
+                if m_idx >= 0: self.dest_loc_input.setCurrentIndex(m_idx)
+            self.dest_loc_input.blockSignals(False)
             
             # Load item names with descriptions
             items = session.query(Item.name, Item.description).all()
@@ -1510,10 +1801,10 @@ class RequestTrackingApp(QWidget):
                 last_req = session.query(SupplyRequest).options(joinedload(SupplyRequest.department)).filter_by(employee_id=emp.id).order_by(SupplyRequest.id.desc()).first()
                 if last_req and last_req.department:
                     self.emp_role_input.setText(last_req.department.role or emp.role or "")
+                    self.supervisor_input.setText(last_req.department.supervisor or "")
                     if self.mode == "SATELLITE":
                         self.area_input.setCurrentText(last_req.department.area_name or "")
                         self.shift_input.setText(last_req.department.shift or "")
-                        self.supervisor_input.setText(last_req.department.supervisor or "")
                 else:
                     self.emp_role_input.setText(emp.role or "")
 
@@ -1556,7 +1847,7 @@ class RequestTrackingApp(QWidget):
         with SessionLocal() as session:
             try:
                 # 1. Get or Create Employee
-                emp = session.query(Employee).filter_by(name=emp_name).first()
+                emp = session.query(Employee).filter(func.upper(Employee.name) == emp_name.upper()).first()
                 if not emp:
                     emp = Employee(name=emp_name, role=self.emp_role_input.text().strip())
                     session.add(emp)
@@ -1607,7 +1898,8 @@ class RequestTrackingApp(QWidget):
                     request_id=new_request.id,
                     item_id=item.id,
                     quantity=qty_float,
-                    frequency=freq
+                    frequency=freq,
+                    is_refill_request=is_refill
                 )
                 session.add(req_item)
 
@@ -1713,24 +2005,45 @@ class RequestTrackingApp(QWidget):
                 ).filter_by(employee_id=emp.id).order_by(SupplyRequest.request_date.desc()).first()
                 
                 # Office View Isolation Filter:
-                # If they have requests, only show them if their latest request matches THIS tab's office.
-                if latest_req and latest_req.dest_location:
+                # 1. Show everything in UNIFIED mode
+                if self.mode == "UNIFIED":
+                    pass
+                # 2. If no requests, show everywhere
+                elif not latest_req:
+                    pass
+                # 3. If requests exist, filter by the latest one's destination
+                elif latest_req.dest_location:
                     if latest_req.dest_location.name != target_loc_name:
-                        continue
-                elif self.mode == "MAIN_OFFICE":
-                    if not latest_req:
                         continue
 
                 area_name = latest_req.department.area_name if latest_req and latest_req.department else "N/A"
                 shift_val = latest_req.department.shift if latest_req and latest_req.department else "N/A"
+                
+                # Fetch count of ALL requests in the period
+                total_in_period = session.query(func.count(SupplyRequest.id)).filter(
+                    SupplyRequest.employee_id == emp.id,
+                    SupplyRequest.request_date >= start_dt,
+                    SupplyRequest.request_date <= end_dt
+                ).scalar() or 0
+                
+                # If the employee has 0 requests in the date range, completely skip them
+                if total_in_period == 0:
+                    continue
                 
                 # 2. Determine "Pending" status based on explicit database column
                 self.table.insertRow(row_idx)
                 self.table.setItem(row_idx, 0, QTableWidgetItem(str(emp.id)))
                 self.table.setItem(row_idx, 1, QTableWidgetItem(emp.name))
                 
-                role_val = latest_req.department.role if latest_req and latest_req.department else (emp.role or "N/A")
-                self.table.setItem(row_idx, 2, QTableWidgetItem(role_val))
+                # Fetch count of fulfilled requests for No. of issuance
+                issuance_count = session.query(func.count(SupplyRequest.id)).filter(
+                    SupplyRequest.employee_id == emp.id,
+                    SupplyRequest.status.in_(["FULFILLED", "DONE", "DELIVERED"]),
+                    SupplyRequest.request_date >= start_dt,
+                    SupplyRequest.request_date <= end_dt
+                ).scalar() or 0
+                
+                self.table.setItem(row_idx, 2, QTableWidgetItem(str(issuance_count)))
                 
                 row_idx += 1
         self.filter_table()
@@ -1754,15 +2067,17 @@ class RequestTrackingApp(QWidget):
         dialog = EmployeeDetailsDialog(employee_id=emp_id, employee_name=emp_name, mode=self.mode, parent=self)
         dialog.exec()
 
-    def open_consumption_report(self):
-        """Opens the overall consumption analysis report."""
-        dialog = ConsumptionReportDialog(mode=self.mode, parent=self)
-        dialog.exec()
 
     def open_pending_deliveries(self):
         """Opens the custodian dashboard for fulfilling requests."""
         dialog = PendingRequestsDialog(mode=self.mode, parent=self)
         dialog.exec()
+
+    def open_google_inbox(self):
+        """Opens the inbox to review Google Form submissions."""
+        dialog = GoogleSyncInboxDialog(mode=self.mode, parent=self)
+        dialog.exec()
+        self.refresh_table()
 
     def delete_selected_employee(self):
         """Removes selected employees and all their history after bulk confirmation."""
@@ -1822,15 +2137,30 @@ class RequestTrackingApp(QWidget):
 
     def filter_table(self):
         """Hides or shows rows based on search text."""
-        search_text = self.search_bar.text().lower()
+        search_text = self.search_bar.text().lower().strip()
+        visible_count = 0
         for row in range(self.table.rowCount()):
             match = False
-            for col in range(self.table.columnCount()):
-                item = self.table.item(row, col)
-                if item and search_text in item.text().lower():
-                    match = True
-                    break
+            if not search_text:
+                match = True
+            else:
+                for col in range(self.table.columnCount()):
+                    item_obj = self.table.item(row, col)
+                    if item_obj and search_text in item_obj.text().lower():
+                        match = True
+                        break
+            
             self.table.setRowHidden(row, not match)
+            if match:
+                visible_count += 1
+                
+        # UX: Update status label
+        if visible_count == 0:
+            self.status_lbl.setText("No employees found matching your search/filters.")
+            self.status_lbl.setStyleSheet("color: #c0392b; font-weight: bold; font-size: 11px; margin-bottom: 5px;")
+        else:
+            self.status_lbl.setText(f"Showing {visible_count} employees with issuance history")
+            self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 5px;")
 
     def run_export(self):
         try:
@@ -1859,6 +2189,51 @@ class RequestTrackingApp(QWidget):
                 QMessageBox.warning(self, "No Data", "No matching records found for the current filters.")
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"Failed to export data:\n{str(e)}")
+
+    def run_issuance_log(self):
+        """Generates an HTML report of all FULFILLED requests (Record issuance log)."""
+        from core.html_generator import generate_html_report
+        import os
+        
+        with SessionLocal() as session:
+            # Query all fulfilled requests
+            fulfilled_items = session.query(RequestItem).join(SupplyRequest).filter(
+                SupplyRequest.status.in_(["FULFILLED", "DONE", "DELIVERED"])
+            ).options(
+                joinedload(RequestItem.item),
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.employee),
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department),
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.source_location),
+                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.dest_location)
+            ).order_by(SupplyRequest.request_date.desc()).all()
+            
+            if not fulfilled_items:
+                QMessageBox.information(self, "No Data", "No fulfilled requests found to generate an issuance log.")
+                return
+                
+            data_rows = []
+            for ri in fulfilled_items:
+                date_str = ri.supply_request.request_date.strftime("%Y-%m-%d")
+                emp_name = ri.supply_request.employee.name if ri.supply_request.employee else "N/A"
+                area = ri.supply_request.department.area_name if ri.supply_request.department else "N/A"
+                item_name = ri.item.name
+                qty = ri.quantity
+                freq = ri.frequency or ""
+                dest = ri.supply_request.dest_location.name if ri.supply_request.dest_location else "N/A"
+                
+                data_rows.append((date_str, emp_name, area, item_name, qty, freq, dest))
+                
+            headers = ["Date", "Employee Name", "Department Area", "Item Name", "Quantity", "Remarks/Frequency", "Destination Location"]
+            
+            fname = f"RECORD_ISSUANCE_LOG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+            
+            try:
+                # Add alphabetical sorting for standard
+                data_rows.sort(key=lambda x: str(x[3]).lower())
+                filename = generate_html_report("📖 Official Record Issuance Log", headers, data_rows, fname)
+                os.startfile(filename)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to generate issuance log: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

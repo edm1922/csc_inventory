@@ -15,7 +15,7 @@ from PyQt6.QtGui import QIcon, QFont, QColor
 from request_main import RequestTrackingApp
 from inventory_main import InventoryManager
 from purchase_main import PurchaseManager
-from dashboard_main import SmartDashboard
+from reports_analytical_main import ReportsAnalyticalHub
 from quick_pull_main import QuickPullManager
 from database import init_db
 
@@ -43,10 +43,10 @@ class MainMenu(QWidget):
         btn_layout.setSpacing(20)
         btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # 1. Smart Analysis (NEW)
+        # 1. Reports / Analytical (NEW)
         self.smart_btn = self.create_menu_button(
-            "📊", "Smart Analysis", 
-            "Visual stats, stock alerts, and automated reports.",
+            "📊", "Reports / Analytical", 
+            "Comprehensive analytics, trends, and operational logs.",
             "#8e44ad"
         )
         self.smart_btn.clicked.connect(lambda: self.parent_window.switch_view(5))
@@ -148,23 +148,32 @@ class MainWindow(QMainWindow):
         self.inventory_view = InventoryManager()
         self.purchase_view = PurchaseManager()
         self.quick_pull_view = QuickPullManager()
-        self.smart_view = SmartDashboard()
+        self.reports_analytical_view = ReportsAnalyticalHub()
         
         # Add a "Back to Menu" button to the sub-views
         self.add_nav_bar(self.unified_request_view)
         self.add_nav_bar(self.inventory_view)
         self.add_nav_bar(self.purchase_view)
         self.add_nav_bar(self.quick_pull_view)
-        self.add_nav_bar(self.smart_view)
+        self.add_nav_bar(self.reports_analytical_view)
         
         self.stack.addWidget(self.menu_view)               # 0
         self.stack.addWidget(self.unified_request_view)    # 1
         self.stack.addWidget(self.quick_pull_view)         # 2
         self.stack.addWidget(self.inventory_view)          # 3
         self.stack.addWidget(self.purchase_view)           # 4
-        self.stack.addWidget(self.smart_view)              # 5
+        self.stack.addWidget(self.reports_analytical_view) # 5
         
         self.stack.setCurrentIndex(0)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.stack.currentIndex() != 0:
+                self.switch_view(0)
+            else:
+                super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
 
     def add_nav_bar(self, widget):
         if widget.layout():
@@ -190,6 +199,7 @@ class MainWindow(QMainWindow):
     def switch_view(self, index):
         self.stack.setCurrentIndex(index)
         if index == 1:
+            self.unified_request_view.load_dropdowns()
             self.unified_request_view.refresh_table()
         elif index == 2:
             self.quick_pull_view.load_logs()
@@ -198,7 +208,7 @@ class MainWindow(QMainWindow):
         elif index == 4:
             self.purchase_view.load_data()
         elif index == 5:
-            self.smart_view.load_data()
+            self.reports_analytical_view.load_data()
 
 if __name__ == "__main__":
     init_db()

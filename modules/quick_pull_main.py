@@ -3,12 +3,17 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
                              QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, 
                              QHeaderView, QGroupBox, QFormLayout, QDialog, QComboBox, 
-                             QDateEdit, QAbstractItemView)
-from PyQt6.QtCore import Qt, QDate
+                             QDateEdit, QAbstractItemView, QMenu)
+from PyQt6.QtCore import Qt, QDate, QTimer
 from PyQt6.QtGui import QFont, QColor
 
-from core.database import SessionLocal, Item, Location, Stock, QuickPullLog, QuickPullItem
+from core.database import SessionLocal, Item, Location, Stock, QuickPullLog, QuickPullItem, InventoryActionLog, Employee
 from sqlalchemy.orm import joinedload
+import qrcode
+from io import BytesIO
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
 
 class QuickPullEntryDialog(QDialog):
     """Dialog to record a new item release (Quick Pull)."""
@@ -31,7 +36,7 @@ class QuickPullEntryDialog(QDialog):
         self.requester_input.setPlaceholderText("Name of person receiving the items")
         
         self.purpose_input = QLineEdit()
-        self.purpose_input.setPlaceholderText("Reason for release")
+        self.purpose_input.setPlaceholderText("Remarks or reason for release")
         
         self.destination_input = QLineEdit()
         self.destination_input.setPlaceholderText("Company or Agency destination")
@@ -42,7 +47,7 @@ class QuickPullEntryDialog(QDialog):
         
         info_layout.addRow("Date:", self.date_input)
         info_layout.addRow("Requested By:", self.requester_input)
-        info_layout.addRow("Purpose:", self.purpose_input)
+        info_layout.addRow("Remarks:", self.purpose_input)
         info_layout.addRow("Where To:", self.destination_input)
         info_layout.addRow("Source Location:", self.location_cb)
         
@@ -66,6 +71,11 @@ class QuickPullEntryDialog(QDialog):
         self.add_item_btn.clicked.connect(self.add_item_to_list)
         sel_layout.addWidget(self.add_item_btn)
         
+        self.remove_item_btn = QPushButton("🗑 Remove Selected")
+        self.remove_item_btn.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold;")
+        self.remove_item_btn.clicked.connect(self.remove_selected_item)
+        sel_layout.addWidget(self.remove_item_btn)
+        
         item_layout.addLayout(sel_layout)
         
         # Selected Items Table
@@ -75,6 +85,8 @@ class QuickPullEntryDialog(QDialog):
         self.table.setColumnHidden(4, True)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setStyleSheet("QTableWidget { background: white; color: black; }")
         item_layout.addWidget(self.table)
         
@@ -82,17 +94,18 @@ class QuickPullEntryDialog(QDialog):
         
         # 3. Actions
         btn_layout = QHBoxLayout()
-        self.submit_btn = QPushButton("✅ Confirm and Deduct Inventory" if not log_id else "💾 Update and Adjust Inventory")
-        self.submit_btn.setStyleSheet("padding: 10px; background-color: #2980b9; color: white; font-weight: bold; font-size: 14px;")
-        self.submit_btn.clicked.connect(self.validate_and_submit)
+        self.submit_btn.setDefault(True)
         
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton("&Cancel")
         cancel_btn.clicked.connect(self.reject)
         
         btn_layout.addStretch()
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(self.submit_btn)
         self.main_layout.addLayout(btn_layout)
+        
+        # UX: Set initial focus to Requester
+        self.requester_input.setFocus()
         
         if self.log_id:
             self.load_log_data()
@@ -153,6 +166,15 @@ class QuickPullEntryDialog(QDialog):
         
         self.table.setItem(row, 4, QTableWidgetItem(str(item_id)))
 
+    def remove_selected_item(self):
+        selected = self.table.selectionModel().selectedRows()
+        if not selected:
+            return
+        
+        # Sort in reverse to delete from bottom up
+        for index in sorted(selected, reverse=True):
+            self.table.removeRow(index.row())
+
     def load_log_data(self):
         """Loads existing log and items into the form for editing."""
         with SessionLocal() as session:
@@ -172,6 +194,8 @@ class QuickPullEntryDialog(QDialog):
                 
                 # Load items
                 for pi in log.pulled_items:
+                    if not pi.item:
+                        continue # Skip deleted items
                     row = self.table.rowCount()
                     self.table.insertRow(row)
                     self.table.setItem(row, 0, QTableWidgetItem(pi.item.name))
@@ -271,6 +295,16 @@ class QuickPullEntryDialog(QDialog):
                          stock = Stock(item_id=clip["id"], location_id=loc_id, quantity=0.0)
                          session.add(stock)
                     stock.quantity -= clip["qty"]
+                    
+                    # 2.4 Log to Activity Log
+                    log_entry = InventoryActionLog(
+                        timestamp=datetime.now(),
+                        item_name=clip["name"],
+                        action_type="REMOVED",
+                        details=f"Quick Pull: {clip['qty']:.2f} units pulled by {log.requested_by}. Remaining Stock: {stock.quantity:.2f}",
+                        user=log.requested_by
+                    )
+                    session.add(log_entry)
                 
                 session.commit()
                 QMessageBox.information(self, "Success", "Record saved and inventory adjusted.")
@@ -278,6 +312,308 @@ class QuickPullEntryDialog(QDialog):
             except Exception as e:
                 session.rollback()
                 QMessageBox.critical(self, "Error", f"Failed to save record: {e}")
+
+class TaggingDialog(QDialog):
+    """Dialog for manual tagging and generating QR codes for item releases."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Release Tagging / QR Generator")
+        self.setMinimumWidth(500)
+        self.db_log_id = None # Track if we've already logged this session
+        
+        self.main_layout = QVBoxLayout(self)
+        
+        form_group = QGroupBox("Release Information")
+        form = QFormLayout(form_group)
+        
+        self.date_issued = QDateEdit(QDate.currentDate())
+        self.date_issued.setCalendarPopup(True)
+        
+        self.date_hired = QDateEdit(QDate.currentDate())
+        self.date_hired.setCalendarPopup(True)
+        
+        self.emp_name = QComboBox()
+        self.emp_name.setEditable(True)
+        self.load_employees()
+        
+        self.emp_role = QLineEdit()
+        self.dept_area = QLineEdit()
+        self.remarks = QLineEdit()
+        
+        self.source_cb = QComboBox()
+        self.load_locations()
+        
+        self.item_cb = QComboBox()
+        self.item_cb.setEditable(True)
+        self.load_items()
+        
+        # Reset log tracking if data changes
+        self.emp_name.currentTextChanged.connect(self.reset_log_tracking)
+        self.item_cb.currentTextChanged.connect(self.reset_log_tracking)
+        self.source_cb.currentTextChanged.connect(self.reset_log_tracking)
+        
+        form.addRow("Issued Date:", self.date_issued)
+        form.addRow("Date Hired:", self.date_hired)
+        form.addRow("Employee Name:", self.emp_name)
+        form.addRow("Employee Role:", self.emp_role)
+        form.addRow("Department Area:", self.dept_area)
+        form.addRow("Remarks:", self.remarks)
+        form.addRow("Source Fulfilment:", self.source_cb)
+        form.addRow("Item Requested:", self.item_cb)
+        
+        self.main_layout.addWidget(form_group)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.print_btn = QPushButton("🖨️ &Print Form (PDF)")
+        self.print_btn.setStyleSheet("background-color: #2980b9; color: white; padding: 10px; font-weight: bold;")
+        self.print_btn.clicked.connect(self.generate_form_pdf)
+        
+        self.qr_btn = QPushButton("📱 &Generate QR Code")
+        self.qr_btn.setStyleSheet("background-color: #27ae60; color: white; padding: 10px; font-weight: bold;")
+        self.qr_btn.clicked.connect(self.generate_qr_code)
+        
+        cancel_btn = QPushButton("&Close")
+        cancel_btn.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(self.print_btn)
+        btn_layout.addWidget(self.qr_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        self.main_layout.addLayout(btn_layout)
+        
+        # UX: Set focus to Emp Name
+        self.emp_name.setFocus()
+
+    def load_employees(self):
+        with SessionLocal() as session:
+            emps = session.query(Employee).order_by(Employee.name).all()
+            for e in emps:
+                self.emp_name.addItem(e.name, e.role)
+        self.emp_name.currentIndexChanged.connect(self.auto_fill_role)
+
+    def auto_fill_role(self, idx):
+        role = self.emp_name.itemData(idx)
+        if role:
+            self.emp_role.setText(role)
+
+    def load_locations(self):
+        with SessionLocal() as session:
+            locs = session.query(Location).all()
+            for l in locs:
+                self.source_cb.addItem(l.name)
+
+    def load_items(self):
+        with SessionLocal() as session:
+            items = session.query(Item).order_by(Item.name).all()
+            for it in items:
+                label = f"{it.name}"
+                if it.description:
+                    label += f" - {it.description}"
+                self.item_cb.addItem(label, it.id)
+
+    def get_form_data(self):
+        return {
+            "issued_date": self.date_issued.date().toString("yyyy-MM-dd"),
+            "date_hired": self.date_hired.date().toString("yyyy-MM-dd"),
+            "emp_name": self.emp_name.currentText().upper(),
+            "emp_role": self.emp_role.text().upper(),
+            "area": self.dept_area.text().upper(),
+            "remarks": self.remarks.text().upper(),
+            "source": self.source_cb.currentText().upper(),
+            "item": self.item_cb.currentText().upper(),
+            "item_id": self.item_cb.currentData()
+        }
+
+    def reset_log_tracking(self):
+        self.db_log_id = None
+
+    def log_to_database(self):
+        """Deducts stock and creates a Quick Pull log entry."""
+        if self.db_log_id:
+            return True # Already logged this session
+            
+        data = self.get_form_data()
+        
+        # Basic validation
+        if not data["emp_name"] or not data["item"] or not data["source"]:
+            QMessageBox.warning(self, "Incomplete Data", "Please ensure Employee, Item, and Source are filled.")
+            return False
+
+        reply = QMessageBox.question(self, "Confirm Log", 
+                                   f"This will deduct 1.0 unit of '{data['item']}' from '{data['source']}' and log the pull.\n\nProceed?",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+
+        with SessionLocal() as session:
+            try:
+                # 1. Find Item and Location
+                if data["item_id"]:
+                    item = session.query(Item).get(data["item_id"])
+                else:
+                    # Fallback for manual typing
+                    name_only = data["item"].split(" - ")[0]
+                    item = session.query(Item).filter(Item.name == name_only).first()
+                
+                loc = session.query(Location).filter(Location.name == data["source"]).first()
+                
+                if not item:
+                    QMessageBox.warning(self, "Error", f"Item '{data['item']}' not found in database.")
+                    return False
+                if not loc:
+                    QMessageBox.warning(self, "Error", f"Location '{data['source']}' not found in database.")
+                    return False
+                
+                # 2. Check and Deduct Stock
+                stock = session.query(Stock).filter_by(item_id=item.id, location_id=loc.id).first()
+                if not stock or stock.quantity < 1.0:
+                    available = stock.quantity if stock else 0.0
+                    QMessageBox.warning(self, "Insufficient Stock", f"Only {available:.2f} available at {data['source']}.")
+                    return False
+                
+                stock.quantity -= 1.0
+                
+                # 3. Create Quick Pull Log
+                log = QuickPullLog(
+                    date=datetime.now(),
+                    requested_by=data["emp_name"],
+                    purpose=data["remarks"],
+                    destination=data["area"],
+                    source_location_id=loc.id
+                )
+                session.add(log)
+                session.flush() # Get log.id
+                
+                # 4. Create Quick Pull Item
+                p_item = QuickPullItem(
+                    log_id=log.id,
+                    item_id=item.id,
+                    quantity=1.0
+                )
+                session.add(p_item)
+                
+                # 5. Inventory Action Log
+                action_log = InventoryActionLog(
+                    timestamp=datetime.now(),
+                    item_name=item.name,
+                    action_type="REMOVED",
+                    details=f"Tagged Release: 1.0 unit pulled by {data['emp_name']}. Source: {data['source']}",
+                    user=data["emp_name"]
+                )
+                session.add(action_log)
+                
+                session.commit()
+                self.db_log_id = log.id
+                return True
+            except Exception as e:
+                session.rollback()
+                QMessageBox.critical(self, "Error", f"Failed to log transaction: {e}")
+                return False
+
+    def generate_form_pdf(self):
+        if not self.log_to_database():
+            return
+            
+        data = self.get_form_data()
+        filename = f"RELEASE_TAG_{data['emp_name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
+        
+        try:
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+            
+            # Header
+            c.setFont("Helvetica-Bold", 16)
+            c.drawCentredString(width/2, height - 50, "ITEM RELEASE / TAGGING FORM")
+            
+            c.setFont("Helvetica", 12)
+            c.line(50, height - 60, width - 50, height - 60)
+            
+            y = height - 100
+            line_height = 25
+            
+            headers = [
+                ("Issued Date:", data['issued_date']),
+                ("Date Hired:", data['date_hired']),
+                ("Employee Name:", data['emp_name']),
+                ("Employee Role:", data['emp_role']),
+                ("Department Area:", data['area']),
+                ("Remarks:", data['remarks']),
+                ("Source Fulfillment:", data['source']),
+                ("Item Requested:", data['item'])
+            ]
+            
+            for label, val in headers:
+                c.setFont("Helvetica-Bold", 11)
+                c.drawString(70, y, label)
+                c.setFont("Helvetica", 11)
+                c.drawString(200, y, str(val))
+                y -= line_height
+
+            # Signatures
+            y -= 40
+            c.line(70, y, 220, y)
+            c.line(width - 220, y, width - 70, y)
+            
+            c.setFont("Helvetica", 10)
+            c.drawCentredString(145, y - 15, "Prepared By")
+            c.drawCentredString(width - 145, y - 15, "Approved By")
+            
+            c.save()
+            os.startfile(filename)
+            QMessageBox.information(self, "Success", f"PDF Form generated: {filename}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to generate PDF: {e}")
+
+    def generate_qr_code(self):
+        if not self.log_to_database():
+            return
+            
+        data = self.get_form_data()
+        
+        # We use a consolidated vCard 3.0 format.
+        # To ensure all scanners show the 'Most Important' data, 
+        # we put everything into the NOTE field with clear labels.
+        vcard_payload = (
+            f"BEGIN:VCARD\n"
+            f"VERSION:3.0\n"
+            f"FN:TAG: {data['item']}\n"
+            f"ORG:{data['area']}\n"
+            f"NOTE:ITEM    : {data['item']}\\n"
+            f"EMPLOYEE: {data['emp_name']}\\n"
+            f"ROLE    : {data['emp_role']}\\n"
+            f"AREA    : {data['area']}\\n"
+            f"SOURCE  : {data['source']}\\n"
+            f"DATE    : {data['issued_date']}\\n"
+            f"--------------------------\\n"
+            f"REMARKS : {data['remarks']}\\n"
+            f"ID      : {self.db_log_id or 'N/A'}\\n"
+            f"SYSTEM  : Unified Inventory\n"
+            f"END:VCARD"
+        )
+        
+        qr_payload = vcard_payload
+        
+        filename = f"QR_{data['emp_name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+        
+        try:
+            qr = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=10, 
+                border=4
+            )
+            qr.add_data(qr_payload)
+            qr.make(fit=True)
+            
+            img = qr.make_image(fill_color="#1a2a6c", back_color="white")
+            img.save(filename)
+            
+            os.startfile(filename)
+            QMessageBox.information(self, "Success", f"QR Code generated as a Comprehensive Record Card: {filename}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to generate QR: {e}")
 
 class QuickPullManager(QWidget):
     """Main view for Quick Pull logbook."""
@@ -287,8 +623,12 @@ class QuickPullManager(QWidget):
         
         # Header
         header = QLabel("Quick Pull Logbook")
-        header.setStyleSheet("font-size: 22px; font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
+        header.setStyleSheet("font-size: 22px; font-weight: bold; color: #2c3e50; margin-bottom: 2px;")
         self.main_layout.addWidget(header)
+        
+        self.status_lbl = QLabel("Showing all logs")
+        self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
+        self.main_layout.addWidget(self.status_lbl)
         
         # Toolbar
         toolbar = QHBoxLayout()
@@ -296,6 +636,11 @@ class QuickPullManager(QWidget):
         self.add_btn.setStyleSheet("padding: 10px; background-color: #27ae60; color: white; font-weight: bold; border-radius: 5px;")
         self.add_btn.clicked.connect(self.open_add_dialog)
         toolbar.addWidget(self.add_btn)
+
+        self.tag_btn = QPushButton("🏷️ Tagging / QR Gen")
+        self.tag_btn.setStyleSheet("padding: 10px; background-color: #8e44ad; color: white; font-weight: bold; border-radius: 5px;")
+        self.tag_btn.clicked.connect(self.open_tagging_dialog)
+        toolbar.addWidget(self.tag_btn)
         
         self.delete_btn = QPushButton("🗑 Delete Selected")
         self.delete_btn.setStyleSheet("padding: 10px; background-color: #c0392b; color: white; font-weight: bold; border-radius: 5px;")
@@ -304,10 +649,16 @@ class QuickPullManager(QWidget):
         
         toolbar.addStretch()
         
+        # Search Debounce Timer
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(300) # Wait 300ms until user stops typing
+        self.search_timer.timeout.connect(self.load_logs)
+        
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Filter logs by requester, purpose, or item...")
+        self.search_input.setPlaceholderText("Filter logs by requester, remarks, or item...")
         self.search_input.setFixedWidth(300)
-        self.search_input.textChanged.connect(self.load_logs)
+        self.search_input.textChanged.connect(self.search_timer.start)
         toolbar.addWidget(self.search_input)
         
         self.main_layout.addLayout(toolbar)
@@ -315,7 +666,7 @@ class QuickPullManager(QWidget):
         # Log Table
         self.table = QTableWidget()
         self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["Date", "Requested By", "Items Pulled", "Location", "Purpose", "Destination", "ID"])
+        self.table.setHorizontalHeaderLabels(["Date", "Requested By", "Items Pulled", "Location", "Remarks", "Destination", "ID"])
         self.table.setColumnHidden(6, True)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -332,6 +683,11 @@ class QuickPullManager(QWidget):
         d = QuickPullEntryDialog(None, self)
         if d.exec():
             self.load_logs()
+
+    def open_tagging_dialog(self):
+        d = TaggingDialog(self)
+        d.exec()
+        self.load_logs() # Refresh main table in case items were logged
 
     def edit_log(self, row, col):
         log_id = int(self.table.item(row, 6).text())
@@ -377,17 +733,31 @@ class QuickPullManager(QWidget):
             ).order_by(QuickPullLog.date.desc())
             
             if search:
-                # Basic filtering by requester, purpose, or location
-                # For comprehensive item search, we'd need more complex joining
-                query = query.filter(
+                # Comprehensive filtering by requester, purpose, destination, location, or associated items
+                query = query.join(QuickPullLog.source_location).filter(
                     (QuickPullLog.requested_by.contains(search)) |
                     (QuickPullLog.purpose.contains(search)) |
-                    (QuickPullLog.destination.contains(search))
-                )
+                    (QuickPullLog.destination.contains(search)) |
+                    (Location.name.contains(search)) |
+                    (QuickPullLog.pulled_items.any(
+                        QuickPullItem.item.has(
+                            (Item.name.contains(search)) |
+                            (Item.description.contains(search))
+                        )
+                    ))
+                ).distinct()
             
             logs = query.all()
             
             self.table.setRowCount(len(logs))
+            
+            # UX: Update status label
+            if len(logs) == 0:
+                self.status_lbl.setText("No release records found matching your search.")
+                self.status_lbl.setStyleSheet("color: #c0392b; font-weight: bold; font-size: 11px; margin-bottom: 10px;")
+            else:
+                self.status_lbl.setText(f"Showing {len(logs)} release records")
+                self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
             for i, log in enumerate(logs):
                 self.table.setItem(i, 0, QTableWidgetItem(log.date.strftime("%Y-%m-%d %H:%M")))
                 self.table.setItem(i, 1, QTableWidgetItem(log.requested_by))
@@ -395,6 +765,9 @@ class QuickPullManager(QWidget):
                 # Format items summary: "Item A - Description (5), Item B (2)"
                 items_list = []
                 for pi in log.pulled_items:
+                    if not pi.item:
+                        items_list.append(f"Deleted Item ({pi.quantity:.2f})")
+                        continue
                     summary = f"{pi.item.name}"
                     if pi.item.description:
                          summary += f" - {pi.item.description}"

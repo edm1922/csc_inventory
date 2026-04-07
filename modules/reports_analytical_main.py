@@ -427,8 +427,8 @@ class InventoryAnalysisView(QWidget):
         
         # Table of flagged items moved here
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Item Name", "Current Qty", "Threshold", "Status"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Item Name", "Description", "Current Qty", "Threshold", "Status"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setStyleSheet("""
             QTableWidget { background: white; color: black; border: 1px solid #eee; border-radius: 5px; font-size: 11px; }
@@ -471,7 +471,7 @@ class InventoryAnalysisView(QWidget):
                     healthy += 1
                 elif status == "Need Restock":
                     restock += 1
-                    self.add_table_row(item.name, qty, threshold, status, "#e74c3c")
+                    self.add_table_row(item.name, item.description or "", qty, threshold, status, "#e74c3c")
             
             self.total_card.update_value(total)
             self.healthy_card.update_value(healthy)
@@ -517,18 +517,19 @@ class InventoryAnalysisView(QWidget):
             trends.append((month_str, count))
         self.trend_chart.set_data(trends)
 
-    def add_table_row(self, name, qty, threshold, status, color):
+    def add_table_row(self, name, description, qty, threshold, status, color):
         row = self.table.rowCount()
         self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem(name))
-        self.table.setItem(row, 1, QTableWidgetItem(f"{qty:.2f}"))
-        self.table.setItem(row, 2, QTableWidgetItem(f"{threshold:.2f}"))
+        self.table.setItem(row, 1, QTableWidgetItem(description))
+        self.table.setItem(row, 2, QTableWidgetItem(f"{qty:.2f}"))
+        self.table.setItem(row, 3, QTableWidgetItem(f"{threshold:.2f}"))
         status_item = QTableWidgetItem(status)
         status_item.setForeground(QColor(color))
         font = status_item.font()
         font.setBold(True)
         status_item.setFont(font)
-        self.table.setItem(row, 3, status_item)
+        self.table.setItem(row, 4, status_item)
 
     def export_inventory_excel(self):
         loc_name = self.loc_cb.currentText()
@@ -685,8 +686,8 @@ class EmployeeAnalysisView(QWidget):
         table_layout.addWidget(self.details_lbl)
         
         self.details_table = QTableWidget()
-        self.details_table.setColumnCount(4)
-        self.details_table.setHorizontalHeaderLabels(["Date", "Item", "Qty", "Area"])
+        self.details_table.setColumnCount(5)
+        self.details_table.setHorizontalHeaderLabels(["Date", "Item Name", "Description", "Qty", "Area"])
         self.details_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.details_table.verticalHeader().setVisible(False)
         self.details_table.setAlternatingRowColors(True)
@@ -926,8 +927,9 @@ class EmployeeAnalysisView(QWidget):
                     self.details_table.insertRow(row)
                     self.details_table.setItem(row, 0, QTableWidgetItem(date_str))
                     self.details_table.setItem(row, 1, QTableWidgetItem(ri.item.name))
-                    self.details_table.setItem(row, 2, QTableWidgetItem(f"{ri.quantity:.2f}"))
-                    self.details_table.setItem(row, 3, QTableWidgetItem(area))
+                    self.details_table.setItem(row, 2, QTableWidgetItem(ri.item.description or ""))
+                    self.details_table.setItem(row, 3, QTableWidgetItem(f"{ri.quantity:.2f}"))
+                    self.details_table.setItem(row, 4, QTableWidgetItem(area))
 
     def run_employee_export(self):
         items = self.emp_list.selectedItems()

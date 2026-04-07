@@ -14,6 +14,7 @@ from exporter import generate_inventory_checklist, generate_stock_confirmation_w
 from core.excel_generator import generate_excel_report
 from datetime import datetime
 import os
+from PyQt6.QtCore import Qt, QTimer
 
 class ThresholdSettingsDialog(QDialog):
     """Dialog to edit global stock threshold settings."""
@@ -42,15 +43,19 @@ class ThresholdSettingsDialog(QDialog):
         self.box_input.setText(str(t.get("box_threshold", 10.0)))
         
         btns = QHBoxLayout()
-        save_btn = QPushButton("Save Defaults")
+        save_btn = QPushButton("&Save Defaults")
         save_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
         save_btn.clicked.connect(self.save_settings)
-        cancel_btn = QPushButton("Cancel")
+        save_btn.setDefault(True)
+        cancel_btn = QPushButton("&Cancel")
         cancel_btn.clicked.connect(self.reject)
         
         btns.addWidget(save_btn)
         btns.addWidget(cancel_btn)
         layout.addLayout(btns)
+        
+        # UX: Set focus to first input
+        self.pcs_input.setFocus()
         
     def save_settings(self):
         try:
@@ -122,13 +127,18 @@ class EditItemDialog(QDialog):
         layout.addLayout(form)
         
         btns = QHBoxLayout()
-        self.save_btn = QPushButton("Save")
+        self.save_btn = QPushButton("&Save")
+        self.save_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
         self.save_btn.clicked.connect(self.accept)
-        self.cancel_btn = QPushButton("Cancel")
+        self.save_btn.setDefault(True)
+        self.cancel_btn = QPushButton("&Cancel")
         self.cancel_btn.clicked.connect(self.reject)
         btns.addWidget(self.save_btn)
         btns.addWidget(self.cancel_btn)
         layout.addLayout(btns)
+        
+        # UX: Set initial focus
+        self.name_input.setFocus()
         
         self.load_locations()
         if self.item_id:
@@ -224,13 +234,14 @@ class LocationManagerDialog(QDialog):
         
         # Action Buttons
         btn_layout = QHBoxLayout()
-        self.edit_btn = QPushButton("Edit Selected")
+        self.edit_btn = QPushButton("&Edit Selected")
         self.edit_btn.clicked.connect(self.edit_location)
-        self.delete_btn = QPushButton("Delete Selected")
+        self.delete_btn = QPushButton("&Delete Selected")
         self.delete_btn.setStyleSheet("background-color: #c0392b; color: white;")
         self.delete_btn.clicked.connect(self.delete_location)
-        self.close_btn = QPushButton("Close")
+        self.close_btn = QPushButton("&Close")
         self.close_btn.clicked.connect(self.accept)
+        self.close_btn.setDefault(True)
         
         btn_layout.addWidget(self.edit_btn)
         btn_layout.addWidget(self.delete_btn)
@@ -318,14 +329,24 @@ class InventoryManager(QWidget):
         
         # Header
         header = QLabel("Supplies Inventory Management")
-        header.setStyleSheet("font-size: 20px; font-weight: bold; color: #1F4E78; margin-bottom: 10px;")
+        header.setStyleSheet("font-size: 20px; font-weight: bold; color: #1F4E78; margin-bottom: 2px;")
         self.main_layout.addWidget(header)
         
+        self.status_lbl = QLabel("Ready")
+        self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
+        self.main_layout.addWidget(self.status_lbl)
+        
         # Filter Bar
-        filter_layout = QHBoxLayout()
+        # Search Debounce Timer
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(300) # Wait 300ms until user stops typing
+        self.search_timer.timeout.connect(self.load_data)
+        
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search Item or Description...")
-        self.search_input.textChanged.connect(self.load_data)
+        self.search_input.textChanged.connect(self.search_timer.start)
+        filter_layout = QHBoxLayout()
         filter_layout.addWidget(self.search_input)
         
         filter_layout.addWidget(QLabel("Location:"))
@@ -451,6 +472,14 @@ class InventoryManager(QWidget):
 
             self.table.setSortingEnabled(True)
             self.table.sortItems(0, Qt.SortOrder.AscendingOrder)
+            
+            # UX: Update status label
+            if len(display_rows) == 0:
+                self.status_lbl.setText("No items found matching your filters.")
+                self.status_lbl.setStyleSheet("color: #c0392b; font-weight: bold; font-size: 11px; margin-bottom: 10px;")
+            else:
+                self.status_lbl.setText(f"Showing {len(display_rows)} item/location records")
+                self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
 
     def add_item(self):
         dialog = EditItemDialog(parent=self)
@@ -722,7 +751,6 @@ class InventoryManager(QWidget):
                 return
             
             # Open the file automatically
-            import os
             os.startfile(filename) if sys.platform == "win32" else None
             QMessageBox.information(self, "Success", f"{msg}\nOpening file...")
         except Exception as e:

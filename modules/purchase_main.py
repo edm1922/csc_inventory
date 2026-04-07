@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdi
                              QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, 
                              QHeaderView, QGroupBox, QFormLayout, QDialog, QDateEdit,
                              QAbstractItemView)
-from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtCore import Qt, QDate, QTimer
 from PyQt6.QtGui import QDoubleValidator
 
 from database import SessionLocal, PurchaseRequest, PurchaseItem
@@ -26,6 +26,7 @@ class PurchaseRequestDialog(QDialog):
         self.date_input = QDateEdit()
         self.date_input.setCalendarPopup(True)
         self.date_input.setDate(QDate.currentDate())
+        self.date_input.dateChanged.connect(self.auto_generate_pr_no)
         
         self.pr_no_input = QLineEdit()
         self.pr_no_input.setPlaceholderText("e.g., 000001")
@@ -38,11 +39,15 @@ class PurchaseRequestDialog(QDialog):
         
         self.position_input = QLineEdit()
         
+        self.supplier_input = QLineEdit()
+        self.supplier_input.setPlaceholderText("e.g. BOSS HOUSE or VENDOR NAME")
+        
         header_layout.addRow("Date:", self.date_input)
         header_layout.addRow("PR No.:", self.pr_no_input)
         header_layout.addRow("Department:", self.dept_input)
         header_layout.addRow("End-User:", self.end_user_input)
         header_layout.addRow("Position:", self.position_input)
+        header_layout.addRow("Source / Supplier:", self.supplier_input)
         
         self.main_layout.addWidget(header_group)
         
@@ -87,15 +92,21 @@ class PurchaseRequestDialog(QDialog):
         
         # Action Buttons
         btns = QHBoxLayout()
-        self.save_btn = QPushButton("Save Request")
+        self.save_btn = QPushButton("&Save Request")
         self.save_btn.setStyleSheet("background-color: #27ae60; color: white; padding: 10px; font-weight: bold;")
         self.save_btn.clicked.connect(self.accept)
-        self.cancel_btn = QPushButton("Cancel")
+        self.save_btn.setDefault(True)
+        
+        self.cancel_btn = QPushButton("&Cancel")
         self.cancel_btn.clicked.connect(self.reject)
+        
         btns.addStretch()
         btns.addWidget(self.save_btn)
         btns.addWidget(self.cancel_btn)
         self.main_layout.addLayout(btns)
+        
+        # UX: Set focus to PR No
+        self.pr_no_input.setFocus()
         
         if self.pr_id:
             self.load_pr_data()
@@ -104,21 +115,32 @@ class PurchaseRequestDialog(QDialog):
             self.auto_generate_pr_no()
 
     def auto_generate_pr_no(self):
+        selected_date = self.date_input.date().toPyDate()
+        target_dt = datetime(selected_date.year, selected_date.month, selected_date.day)
+
         with SessionLocal() as session:
-            # Query all PR numbers to find the actual maximum numeric value
-            all_pnos = session.query(PurchaseRequest.pr_no).all()
-            max_val = 0
-            for (pno,) in all_pnos:
-                try:
-                    # Clean the string in case of leading/trailing spaces
-                    val = int(pno.strip())
-                    if val > max_val:
-                        max_val = val
-                except (ValueError, AttributeError):
-                    continue
-            
-            next_no = max_val + 1
-            self.pr_no_input.setText(str(next_no).zfill(6))
+            # 1. Check if a PR already exists for this exact date
+            existing = session.query(PurchaseRequest).filter(
+                PurchaseRequest.request_date == target_dt
+            ).first()
+
+            if existing:
+                # Reuse the same PR number for the same day
+                self.pr_no_input.setText(existing.pr_no)
+            else:
+                # 2. Find the actual maximum numeric value across ALL PRs
+                all_pnos = session.query(PurchaseRequest.pr_no).all()
+                max_val = 0
+                for (pno,) in all_pnos:
+                    try:
+                        val = int(pno.strip())
+                        if val > max_val:
+                            max_val = val
+                    except (ValueError, AttributeError):
+                        continue
+                
+                next_no = max_val + 1
+                self.pr_no_input.setText(str(next_no).zfill(6))
 
     def add_blank_row(self):
         row = self.items_table.rowCount()
@@ -177,6 +199,7 @@ class PurchaseRequestDialog(QDialog):
                 self.dept_input.setText(pr.department)
                 self.end_user_input.setText(pr.end_user or "")
                 self.position_input.setText(pr.position or "")
+                self.supplier_input.setText(pr.supplier or "")
                 self.prepared_by_input.setText(pr.prepared_by or "")
                 self.approved_by_input.setText(pr.approved_by or "")
                 
@@ -215,6 +238,7 @@ class PurchaseRequestDialog(QDialog):
             "dept": self.dept_input.text().strip().upper(),
             "end_user": self.end_user_input.text().strip().upper(),
             "position": self.position_input.text().strip().upper(),
+            "supplier": self.supplier_input.text().strip().upper(),
             "prepared_by": self.prepared_by_input.text().strip().upper(),
             "approved_by": self.approved_by_input.text().strip().upper(),
             "items": items
@@ -226,8 +250,12 @@ class PurchaseManager(QWidget):
         layout = QVBoxLayout(self)
         
         header = QLabel("Purchase Request Management")
-        header.setStyleSheet("font-size: 20px; font-weight: bold; color: #1F4E78; margin-bottom: 10px;")
+        header.setStyleSheet("font-size: 20px; font-weight: bold; color: #1F4E78; margin-bottom: 2px;")
         layout.addWidget(header)
+        
+        self.status_lbl = QLabel("Ready")
+        self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
+        layout.addWidget(self.status_lbl)
         
         btns = QHBoxLayout()
         self.create_btn = QPushButton("+ New Purchase Request")
@@ -240,10 +268,23 @@ class PurchaseManager(QWidget):
         self.delete_btn = QPushButton("🗑 Delete")
         self.delete_btn.clicked.connect(self.delete_pr)
         
+        # Search Debounce Timer
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(300)
+        self.search_timer.timeout.connect(self.load_data)
+        
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search PR No., Department, or End-User...")
+        self.search_input.setFixedWidth(300)
+        self.search_input.textChanged.connect(self.search_timer.start)
+        
         btns.addWidget(self.create_btn)
         btns.addWidget(self.export_btn)
         btns.addWidget(self.delete_btn)
         btns.addStretch()
+        btns.addWidget(QLabel("Search:"))
+        btns.addWidget(self.search_input)
         layout.addLayout(btns)
         
         self.table = QTableWidget()
@@ -258,9 +299,25 @@ class PurchaseManager(QWidget):
         self.load_data()
 
     def load_data(self):
+        search_txt = self.search_input.text().strip().upper() if hasattr(self, 'search_input') else ""
         with SessionLocal() as session:
-            prs = session.query(PurchaseRequest).options(joinedload(PurchaseRequest.items)).order_by(PurchaseRequest.id.desc()).all()
+            query = session.query(PurchaseRequest).options(joinedload(PurchaseRequest.items))
+            if search_txt:
+                query = query.filter(
+                    (PurchaseRequest.pr_no.contains(search_txt)) |
+                    (PurchaseRequest.department.contains(search_txt)) |
+                    (PurchaseRequest.end_user.contains(search_txt))
+                )
+            prs = query.order_by(PurchaseRequest.id.desc()).all()
             self.table.setRowCount(len(prs))
+            
+            # UX: Update status label
+            if len(prs) == 0:
+                self.status_lbl.setText("No purchase requests found matching your search.")
+                self.status_lbl.setStyleSheet("color: #c0392b; font-weight: bold; font-size: 11px; margin-bottom: 10px;")
+            else:
+                self.status_lbl.setText(f"Showing {len(prs)} purchase requests")
+                self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
             for i, pr in enumerate(prs):
                 total_amt = sum(item.total for item in pr.items)
                 self.table.setItem(i, 0, QTableWidgetItem(pr.request_date.strftime("%Y-%m-%d")))
@@ -301,6 +358,7 @@ class PurchaseManager(QWidget):
                 pr.department = data["dept"]
                 pr.end_user = data["end_user"]
                 pr.position = data["position"]
+                pr.supplier = data["supplier"]
                 pr.prepared_by = data["prepared_by"]
                 pr.approved_by = data["approved_by"]
                 

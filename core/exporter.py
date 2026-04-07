@@ -9,6 +9,8 @@ EXPORT_FILE = "CLEANED_SUPPLY_INVENTORY.xlsx"
 
 def export_to_excel(start_date=None, end_date=None, area=None, shift=None, only_pending=False):
     from datetime import datetime
+    import pandas as pd
+    from sqlalchemy.orm import joinedload
     from database import parse_frequency, Department
     
     with SessionLocal() as session:

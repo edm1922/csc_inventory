@@ -55,6 +55,7 @@ class Item(Base):
 
     request_items = relationship("RequestItem", back_populates="item", cascade="all, delete-orphan")
     stocks = relationship("Stock", back_populates="item", cascade="all, delete-orphan")
+    quick_pull_items = relationship("QuickPullItem", back_populates="item", cascade="all, delete-orphan")
 
 class Stock(Base):
     __tablename__ = "stocks"
@@ -104,6 +105,7 @@ class RequestItem(Base):
     item_id = Column(Integer, ForeignKey("items.id"), nullable=False)
     quantity = Column(Float, nullable=False)
     frequency = Column(String, nullable=True)
+    is_refill_request = Column(Boolean, default=False, nullable=False)
 
     supply_request = relationship("SupplyRequest", back_populates="requested_items")
     item = relationship("Item", back_populates="request_items")
@@ -128,13 +130,10 @@ class PurchaseRequest(Base):
     position = Column(String, nullable=True)
     prepared_by = Column(String, nullable=True)
     approved_by = Column(String, nullable=True)
+    supplier = Column(String, nullable=True) # Source or Supplier
     status = Column(String, default="PENDING")
 
     items = relationship("PurchaseItem", back_populates="purchase_request", cascade="all, delete-orphan")
-
-    __table_args__ = (
-        UniqueConstraint('pr_no', 'request_date', name='uix_pr_no_date'),
-    )
 
 class PurchaseItem(Base):
     __tablename__ = "purchase_items"
@@ -170,7 +169,16 @@ class QuickPullItem(Base):
     quantity = Column(Float, nullable=False)
 
     quick_pull_log = relationship("QuickPullLog", back_populates="pulled_items")
-    item = relationship("Item")
+    item = relationship("Item", back_populates="quick_pull_items")
+
+class InventoryActionLog(Base):
+    __tablename__ = "inventory_action_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    item_name = Column(String, nullable=False)
+    action_type = Column(String, nullable=False) # ADDED, REMOVED, UPDATED
+    details = Column(String, nullable=True)     # e.g., "Qty: 50 -> 24"
+    user = Column(String, nullable=True)
 
 def parse_frequency(freq_str):
     """Converts frequency strings like '1 WEEK' or '1 MONTH' into a timedelta."""
@@ -322,10 +330,15 @@ def init_db():
                 position TEXT,
                 prepared_by TEXT,
                 approved_by TEXT,
-                status TEXT DEFAULT 'PENDING',
-                UNIQUE(pr_no, request_date)
+                supplier TEXT,
+                status TEXT DEFAULT 'PENDING'
             )
         """)
+        
+        # Migration: Add supplier to purchase_requests if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE purchase_requests ADD COLUMN supplier TEXT")
+        except sqlite3.OperationalError: pass
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS purchase_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -338,6 +351,17 @@ def init_db():
                 unit TEXT,
                 total REAL DEFAULT 0.0,
                 FOREIGN KEY(pr_id) REFERENCES purchase_requests(id)
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_action_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME NOT NULL,
+                item_name TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                details TEXT,
+                user TEXT
             )
         """)
 

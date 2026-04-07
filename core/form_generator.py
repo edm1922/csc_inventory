@@ -342,6 +342,13 @@ def generate_purchase_request_excel(pr_id):
         ws['B6'] = pr.position or ""
         ws['B6'].border = bottom_border
 
+        # Row 7 - Source / Supplier
+        ws['A7'] = "Source / Supplier:"
+        ws['A7'].font = bold_font
+        ws.merge_cells('B7:G7')
+        ws['B7'] = pr.supplier or ""
+        ws['B7'].border = bottom_border
+
         # Item Details Row
         ws.merge_cells('A8:G8')
         ws['A8'] = "ITEM DETAILS"
@@ -448,6 +455,171 @@ def generate_purchase_request_excel(pr_id):
         filename = f"PURCHASE_REQUEST_{pr.pr_no}.xlsx"
         wb.save(filename)
         return filename
+
+def get_frequency_category(avg_days):
+    """Categorizes based on the average gap between requests."""
+    if avg_days is None or avg_days >= 400: return "UNTIL DEFECTIVE"
+    if avg_days < 2: return "Daily"
+    if avg_days < 5: return "Twice a Week"
+    if avg_days < 10: return "Weekly"
+    if avg_days < 45: return "Monthly"
+    if avg_days < 400: return "Annually"
+    return "UNTIL DEFECTIVE"
+
+def generate_high_frequency_report(data_rows):
+    """Generates report for items with highest request frequency."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "High Frequency Items"
+    
+    # Styles
+    from datetime import datetime
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    center_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+    # Headers
+    headers = ["Item Name", "Total Quantity Requested", "Total Request Count", "Avg Frequency"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(col)].width = 25
+
+    for row_idx, data in enumerate(data_rows, 2):
+        for col_idx, val in enumerate(data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.border = thin_border
+
+    filename = f"HIGH_FREQUENCY_ITEMS_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    return filename
+
+def generate_pending_requests_report(data_rows):
+    """Generates report for pending requests."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Pending Requests"
+    
+    from datetime import datetime
+    header_fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    center_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+    headers = ["Date", "Employee", "Item", "Quantity", "Area", "Status"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(col)].width = 20
+
+    for row_idx, data in enumerate(data_rows, 2):
+        for col_idx, val in enumerate(data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.border = thin_border
+
+    filename = f"PENDING_REQUESTS_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    return filename
+
+def generate_employee_behavior_report(data_rows):
+    """Generates report for employee consumption patterns."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Employee behavior Analysis"
+    
+    from datetime import datetime
+    header_fill = PatternFill(start_color="31869B", end_color="31869B", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    center_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+    headers = ["Employee", "Item", "Total Qty", "Last Date", "Avg Days Between", "Frequency Classification"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(col)].width = 25
+
+    for row_idx, data in enumerate(data_rows, 2):
+        for col_idx, val in enumerate(data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.border = thin_border
+
+    filename = f"EMPLOYEE_BEHAVIOR_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    return filename
+
+def generate_inventory_report(report_type, data_rows):
+    """Generates various types of inventory reports based on context."""
+    from datetime import datetime
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    
+    # Title Mapping
+    titles = {
+        "stock_summary": "STOCK SUMMARY REPORT",
+        "low_stock": "LOW STOCK ITEMS (BELOW STANDARD)",
+        "needs_restock": "URGENT RESTOCK NEEDS",
+        "distribution": "INVENTORY DISTRIBUTION BY LOCATION",
+        "custom_items": "CUSTOM ITEM SELECTION REPORT"
+    }
+    ws.title = report_type.replace("_", " ").title()
+    current_title = titles.get(report_type, "Inventory Report")
+
+    # Header Styles
+    header_fills = {
+        "stock_summary": PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid"),
+        "low_stock": PatternFill(start_color="E26B0A", end_color="E26B0A", fill_type="solid"),
+        "needs_restock": PatternFill(start_color="C00000", end_color="C00000", fill_type="solid"),
+        "distribution": PatternFill(start_color="31869B", end_color="31869B", fill_type="solid")
+    }
+    header_fill = header_fills.get(report_type, header_fills["stock_summary"])
+    header_font = Font(bold=True, color="FFFFFF")
+    center_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+    # Company Header
+    ws.merge_cells('A1:E1')
+    ws['A1'] = f"CENTRO SERVICES COOPERATIVE - {current_title}"
+    ws['A1'].font = Font(bold=True, size=14)
+    ws['A1'].alignment = center_align
+
+    # Headers
+    if report_type == "distribution":
+        headers = ["Item Name", "Location", "Quantity", "Unit", "Status"]
+    else:
+        headers = ["Item Name", "Description", "Actual Stock", "Standard Stock", "Unit"]
+
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=3, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(col)].width = 25
+
+    # Data
+    for row_idx, data in enumerate(data_rows, 4):
+        for col_idx, val in enumerate(data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.border = thin_border
+
+    filename = f"INVENTORY_{report_type.upper()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    return filename
 
 if __name__ == "__main__":
     generate_blank_form()
