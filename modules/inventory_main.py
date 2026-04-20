@@ -44,7 +44,7 @@ class ThresholdSettingsDialog(QDialog):
         
         btns = QHBoxLayout()
         save_btn = QPushButton("&Save Defaults")
-        save_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        save_btn.setProperty("class", "primary")
         save_btn.clicked.connect(self.save_settings)
         save_btn.setDefault(True)
         cancel_btn = QPushButton("&Cancel")
@@ -99,7 +99,7 @@ class EditItemDialog(QDialog):
         self.pending_input = QLineEdit()
         # Non-editable, calculated
         self.pending_input.setReadOnly(True)
-        self.pending_input.setStyleSheet("background-color: #f0f0f0; color: #555;")
+        self.pending_input.setStyleSheet("background-color: #EDF2F7; color: #4A5568;")
         
         # Threshold Hint
         self.threshold_hint = QLabel("Needs Restock when stock ≤ 50% of threshold")
@@ -128,7 +128,7 @@ class EditItemDialog(QDialog):
         
         btns = QHBoxLayout()
         self.save_btn = QPushButton("&Save")
-        self.save_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        self.save_btn.setProperty("class", "primary")
         self.save_btn.clicked.connect(self.accept)
         self.save_btn.setDefault(True)
         self.cancel_btn = QPushButton("&Cancel")
@@ -326,10 +326,12 @@ class InventoryManager(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(30, 25, 30, 25)
+        self.main_layout.setSpacing(20)
         
         # Header
         header = QLabel("Supplies Inventory Management")
-        header.setStyleSheet("font-size: 20px; font-weight: bold; color: #1F4E78; margin-bottom: 2px;")
+        header.setObjectName("headerTitle")
         self.main_layout.addWidget(header)
         
         self.status_lbl = QLabel("Ready")
@@ -357,27 +359,26 @@ class InventoryManager(QWidget):
         filter_layout.addWidget(self.location_filter)
         
         self.add_btn = QPushButton("+ Add New Item")
-        self.add_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        self.add_btn.setProperty("class", "primary")
         self.add_btn.clicked.connect(self.add_item)
         filter_layout.addWidget(self.add_btn)
         
         self.print_btn = QPushButton("🖨️ Print / Export")
-        self.print_btn.setStyleSheet("padding: 8px; background-color: #2980b9; color: white; font-weight: bold; border-radius: 4px;")
+        self.print_btn.setProperty("class", "secondary")
         self.print_btn.clicked.connect(self.open_print_menu)
         filter_layout.addWidget(self.print_btn)
         
+
         self.delete_btn = QPushButton("🗑 Delete Selected")
-        self.delete_btn.setStyleSheet("background-color: #c0392b; color: white;")
+        self.delete_btn.setStyleSheet("background-color: #E53E3E; color: white;")
         self.delete_btn.clicked.connect(self.delete_selected_item)
         filter_layout.addWidget(self.delete_btn)
         
         self.settings_btn = QPushButton("⚙️ Thresholds")
-        self.settings_btn.setStyleSheet("background-color: #7f8c8d; color: white; font-weight: bold;")
         self.settings_btn.clicked.connect(self.open_threshold_settings)
         filter_layout.addWidget(self.settings_btn)
         
         self.manage_loc_btn = QPushButton("📍 Manage Locations")
-        self.manage_loc_btn.setStyleSheet("background-color: #34495e; color: white; font-weight: bold;")
         self.manage_loc_btn.clicked.connect(self.open_location_manager)
         filter_layout.addWidget(self.manage_loc_btn)
         
@@ -476,10 +477,8 @@ class InventoryManager(QWidget):
             # UX: Update status label
             if len(display_rows) == 0:
                 self.status_lbl.setText("No items found matching your filters.")
-                self.status_lbl.setStyleSheet("color: #c0392b; font-weight: bold; font-size: 11px; margin-bottom: 10px;")
             else:
                 self.status_lbl.setText(f"Showing {len(display_rows)} item/location records")
-                self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
 
     def add_item(self):
         dialog = EditItemDialog(parent=self)
@@ -608,6 +607,19 @@ class InventoryManager(QWidget):
             except Exception as e:
                 session.rollback()
                 QMessageBox.critical(self, "Error", f"Failed to save item: {str(e)}")
+
+
+    def _get_selected_items_summary(self):
+        selected_rows = self.table.selectionModel().selectedRows()
+        items = []
+        for row_proxy in selected_rows:
+            r = row_proxy.row()
+            if not self.table.isRowHidden(r):
+                item_name = self.table.item(r, 0).text()
+                desc = self.table.item(r, 1).text()
+                item_id = int(self.table.item(r, 7).text())
+                items.append({"id": item_id, "name": item_name, "desc": desc})
+        return items
 
     def open_threshold_settings(self):
         dialog = ThresholdSettingsDialog(self)

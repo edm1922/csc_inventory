@@ -1,14 +1,15 @@
 import sys
 import os
 from datetime import datetime, timedelta
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRectF
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QComboBox, QTableWidget, QTableWidgetItem, 
                              QHeaderView, QFrame, QLineEdit, QPushButton,
                              QTabWidget, QScrollArea, QListWidget, QListWidgetItem, QProgressBar,
                              QMessageBox, QDialog, QRadioButton, QButtonGroup,
-                             QDialogButtonBox)
-from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal
+                             QDialogButtonBox, QGraphicsDropShadowEffect)
 from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QBrush
+from theme import CHART_COLORS # NEW: Corporate Redesign
 
 from core.database import SessionLocal, Item, Stock, Location, Employee, SupplyRequest, RequestItem, QuickPullLog, QuickPullItem, PurchaseRequest, PurchaseItem, Department, InventoryActionLog
 from core.config import evaluate_stock_status, get_effective_threshold, get_thresholds
@@ -47,16 +48,18 @@ class PieChart(QFrame):
         total = sum([val for val, color, label in self.data])
         if total == 0:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#ecf0f1"))
+            painter.setBrush(QColor("#EDF2F7"))
             painter.drawEllipse(pie_rect)
-            painter.setPen(Qt.GlobalColor.black)
+            painter.setPen(QColor("#718096"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No Data")
             return
             
         start_angle = 0
-        for val, color, label in self.data:
-            span_angle = (val / total) * 360 * 16 # 1/16th of a degree
-            painter.setBrush(QColor(color))
+        for i, (val, color, label) in enumerate(self.data):
+            # Use CHART_COLORS for clean corporate look
+            c = CHART_COLORS[i % len(CHART_COLORS)] if color in ["#e74c3c", "#27ae60", "#2ecc71"] else color
+            span_angle = (val / total) * 360 * 16 
+            painter.setBrush(QColor(c))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPie(pie_rect, int(start_angle), int(span_angle))
             start_angle += span_angle
@@ -64,7 +67,7 @@ class PieChart(QFrame):
         # Draw legend
         leg_x = x + size + 20
         leg_y = y + 20
-        painter.setPen(QColor("#2F3542"))
+        painter.setPen(QColor("#2D3748"))
         font = painter.font()
         font.setPointSize(9)
         painter.setFont(font)
@@ -73,10 +76,11 @@ class PieChart(QFrame):
         display_data = self.data[:5]
         if len(self.data) > 5:
             others_val = sum([v for v, c, l in self.data[5:]])
-            display_data.append((others_val, "#7f8c8d", "Others"))
+            display_data.append((others_val, "#718096", "Others"))
 
-        for val, color, label in display_data:
-            painter.setBrush(QColor(color))
+        for i, (val, color, label) in enumerate(display_data):
+            c = CHART_COLORS[i % len(CHART_COLORS)] if color in ["#e74c3c", "#27ae60", "#2ecc71", "#7f8c8d"] else color
+            painter.setBrush(QColor(c))
             painter.drawRect(int(leg_x), int(leg_y), 10, 10)
             painter.drawText(int(leg_x + 18), int(leg_y + 9), f"{label}")
             leg_y += 22
@@ -146,7 +150,7 @@ class BarChart(QFrame):
         if max_val == 0: max_val = 1
             
         # Draw ticks on Y axis
-        painter.setPen(QColor("#95a5a6"))
+        painter.setPen(QColor("#A0AEC0"))
         tick_steps = 5
         font = painter.font()
         font.setPointSize(8)
@@ -165,15 +169,12 @@ class BarChart(QFrame):
         available_height = rect.height() - margin_y * 2 - 20 
         
         x = margin_x + spacing
-        bar_color = QColor("#4A90E2") # Subdued Blue as primary
-        
         for i, (val, color, label) in enumerate(self.data):
+            c = CHART_COLORS[i % len(CHART_COLORS)]
             bar_height = (val / max_val) * available_height
             y = rect.height() - margin_y - bar_height
             
-            # Use 1-2 colors only as requested
-            current_color = bar_color if i % 2 == 0 else QColor("#A4C8F0")
-            painter.setBrush(current_color)
+            painter.setBrush(QColor(c))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRect(int(x), int(y), int(bar_width), int(bar_height))
             
@@ -252,7 +253,7 @@ class LineChart(QFrame):
         if max_val == 0: max_val = 1
         
         # Draw Y Ticks
-        painter.setPen(QColor("#95a5a6"))
+        painter.setPen(QColor("#A0AEC0"))
         tick_steps = 5
         for i in range(tick_steps + 1):
             val_tick = (max_val / tick_steps) * i
@@ -261,7 +262,7 @@ class LineChart(QFrame):
             painter.drawText(5, int(y_tick + 5), f"{val_tick:.0f}")
             
         # Draw Data Line
-        pen = QPen(QColor("#3498db"), 3)
+        pen = QPen(QColor("#1E3A5F"), 3)
         painter.setPen(pen)
         
         points = []
@@ -279,7 +280,7 @@ class LineChart(QFrame):
             painter.drawLine(int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]))
             
         # Draw Data Points
-        painter.setBrush(QColor("#2980b9"))
+        painter.setBrush(QColor("#2C5282"))
         painter.setPen(Qt.PenStyle.NoPen)
         for px, py in points:
             painter.drawEllipse(int(px - 4), int(py - 4), 8, 8)
@@ -299,25 +300,25 @@ class LineChart(QFrame):
 class HighlightCard(QFrame):
     def __init__(self, title, value, color):
         super().__init__()
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: white;
-                border: none;
-                border-top: 3px solid {color};
-                border-radius: 4px;
-            }}
-        """)
+        self.setProperty("class", "card")
         self.setFixedSize(200, 80)
+        
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(15)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 25))
+        self.setGraphicsEffect(shadow)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(15, 10, 15, 10)
         layout.setSpacing(2)
         
         self.title_lbl = QLabel(title)
-        self.title_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; text-transform: uppercase; background: transparent;")
+        self.title_lbl.setStyleSheet("color: #718096; font-size: 11px; text-transform: uppercase; background: transparent;")
         
         self.val_lbl = QLabel(str(value))
-        self.val_lbl.setStyleSheet(f"color: #2F3542; font-size: 20px; font-weight: bold; background: transparent;")
+        self.val_lbl.setStyleSheet("color: #1E3A5F; font-size: 20px; font-weight: bold; background: transparent;")
         
         layout.addWidget(self.title_lbl)
         layout.addWidget(self.val_lbl)
@@ -328,10 +329,9 @@ class HighlightCard(QFrame):
 class InventoryAnalysisView(QWidget):
     def __init__(self):
         super().__init__()
-        self.setStyleSheet("background-color: #F5F6FA;")
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(25, 20, 25, 20)
-        self.main_layout.setSpacing(20)
+        self.main_layout.setContentsMargins(30, 25, 30, 25)
+        self.main_layout.setSpacing(25)
         
         # Header / Filters
         filter_layout = QHBoxLayout()
@@ -341,13 +341,11 @@ class InventoryAnalysisView(QWidget):
             locations = [loc.name for loc in db.query(Location).order_by(Location.name).all()]
         self.loc_cb.addItems(locations + ["ALL LOCATIONS"])
         
-        self.loc_cb.setStyleSheet("padding: 8px; border-radius: 5px; min-width: 150px; background: white; color: black;")
-        self.loc_cb.currentTextChanged.connect(self.load_data)
         filter_layout.addWidget(QLabel("<b>Location Filter:</b>"))
         filter_layout.addWidget(self.loc_cb)
         
         self.refresh_btn = QPushButton("🔄 Refresh Analytics")
-        self.refresh_btn.setStyleSheet("padding: 8px 15px; background-color: #3498db; color: white; font-weight: bold; border-radius: 5px;")
+        self.refresh_btn.setStyleSheet("background-color: #3182CE;")
         self.refresh_btn.clicked.connect(self.load_data)
         
         filter_layout.addStretch()
@@ -370,7 +368,7 @@ class InventoryAnalysisView(QWidget):
         
         # Stock Distribution (Pie) - TOP LEFT
         pie_container = QFrame()
-        pie_container.setStyleSheet("background: white; border-radius: 8px; border: none;")
+        pie_container.setProperty("class", "card")
         pie_layout = QVBoxLayout(pie_container)
         pie_layout.setContentsMargins(20, 15, 20, 15)
         pie_title = QLabel("Stock Category Distribution")
@@ -383,7 +381,7 @@ class InventoryAnalysisView(QWidget):
         
         # Monthly Issuance Trends (Line) - TOP RIGHT
         trends_container = QFrame()
-        trends_container.setStyleSheet("background: white; border-radius: 8px; border: none;")
+        trends_container.setProperty("class", "card")
         trends_vbox = QVBoxLayout(trends_container)
         trends_vbox.setContentsMargins(20, 15, 20, 15)
         trends_title = QLabel("📉 Monthly Issuance Trends")
@@ -401,7 +399,7 @@ class InventoryAnalysisView(QWidget):
         
         # Item Activity Log (New) - BOTTOM LEFT
         activity_container = QFrame()
-        activity_container.setStyleSheet("background: white; border-radius: 8px; border: none;")
+        activity_container.setProperty("class", "card")
         activity_vbox = QVBoxLayout(activity_container)
         activity_vbox.setContentsMargins(20, 15, 20, 15)
         activity_title = QLabel("📜 Item Activity Log")
@@ -418,11 +416,11 @@ class InventoryAnalysisView(QWidget):
         
         # Recurring Stock Issues (Table) - BOTTOM RIGHT
         recurring_container = QFrame()
-        recurring_container.setStyleSheet("background: white; border-radius: 8px; border: none;")
+        recurring_container.setProperty("class", "card")
         recurring_vbox = QVBoxLayout(recurring_container)
         recurring_vbox.setContentsMargins(20, 15, 20, 15)
         recurring_title = QLabel("⚠️ Recurring Stock Issues")
-        recurring_title.setStyleSheet("font-weight: bold; color: #c0392b; padding-bottom: 10px;")
+        recurring_title.setStyleSheet("font-weight: 800; color: #E53E3E; padding-bottom: 10px; background: transparent;")
         recurring_vbox.addWidget(recurring_title)
         
         # Table of flagged items moved here
@@ -430,10 +428,7 @@ class InventoryAnalysisView(QWidget):
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["Item Name", "Description", "Current Qty", "Threshold", "Status"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setStyleSheet("""
-            QTableWidget { background: white; color: black; border: 1px solid #eee; border-radius: 5px; font-size: 11px; }
-            QHeaderView::section { background: #fdfdfd; padding: 4px; font-weight: bold; color: #7f8c8d; }
-        """)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         recurring_vbox.addWidget(self.table)
         bottom_layout.addWidget(recurring_container, 2) # Wider for the table
         
@@ -479,8 +474,8 @@ class InventoryAnalysisView(QWidget):
             
             # Charts
             dist_data = []
-            if healthy > 0: dist_data.append((healthy, "#2ecc71", "Sufficient"))
-            if restock > 0: dist_data.append((restock, "#e74c3c", "Restock"))
+            if healthy > 0: dist_data.append((healthy, "#38A169", "Sufficient"))
+            if restock > 0: dist_data.append((restock, "#E53E3E", "Restock"))
             self.pie_chart.set_data(dist_data)
             
             # Load Trends
@@ -493,8 +488,8 @@ class InventoryAnalysisView(QWidget):
                 time_str = log.timestamp.strftime("%Y-%m-%d %I:%M %p")
                 icon = "✅" if log.action_type == "ADDED" else "✏️" if log.action_type == "UPDATED" else "❌"
                 list_item = QListWidgetItem(f"[{time_str}] {log.item_name} \n{icon} {log.action_type}: {log.details}")
-                if log.action_type == "REMOVED": list_item.setForeground(QColor("#c0392b"))
-                elif log.action_type == "ADDED": list_item.setForeground(QColor("#27ae60"))
+                if log.action_type == "REMOVED": list_item.setForeground(QColor("#E53E3E"))
+                elif log.action_type == "ADDED": list_item.setForeground(QColor("#38A169"))
                 self.activity_list.addItem(list_item)
 
     def load_trends(self, db):
@@ -571,10 +566,10 @@ class EmployeeAnalysisView(QWidget):
         # Row 1: Key Metrics (Simplified Cards)
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(15)
-        self.top_emp_card = HighlightCard("Top Requester", "---", "#4A90E2")
-        self.top_item_card = HighlightCard("Hot Item", "---", "#F39C12")
-        self.active_dept_card = HighlightCard("Busy Area", "---", "#2ECC71")
-        self.total_req_card = HighlightCard("Total Requests", "0", "#9B59B6")
+        self.top_emp_card = HighlightCard("Top Requester", "---", "#3182CE")
+        self.top_item_card = HighlightCard("Hot Item", "---", "#D69E2E")
+        self.active_dept_card = HighlightCard("Busy Area", "---", "#38A169")
+        self.total_req_card = HighlightCard("Total Requests", "0", "#805AD5")
         
         cards_layout.addWidget(self.top_emp_card)
         cards_layout.addWidget(self.top_item_card)
@@ -1070,38 +1065,26 @@ class ActivityLogView(QWidget):
 class ReportsAnalyticalHub(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet("background-color: #F5F6FA;")
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
         
         # Top Bar (Minimal)
         top_bar = QFrame()
-        top_bar.setFixedHeight(60)
-        top_bar.setStyleSheet("background-color: #FFFFFF; border-bottom: 1px solid #E1E4E8;")
+        top_bar.setFixedHeight(65)
+        top_bar.setStyleSheet("background-color: #FFFFFF; border-bottom: 1px solid #E2E8F0;")
         top_bar_layout = QHBoxLayout(top_bar)
         top_bar_layout.setContentsMargins(30, 0, 30, 0)
         
-        title = QLabel("Reports & Analytics")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #2F3542;")
+        title = QLabel("REPORTS & ANALYTICS")
+        title.setObjectName("headerTitle")
         top_bar_layout.addWidget(title)
         
         top_bar_layout.addStretch()
         
         # Export/Report Action (One primary button only)
         self.export_btn = QPushButton("Generate Report")
-        self.export_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 18px;
-                background-color: #4A90E2;
-                color: white;
-                font-weight: bold;
-                border: none;
-                border-radius: 4px;
-                font-size: 13px;
-            }
-            QPushButton:hover { background-color: #357ABD; }
-        """)
+        self.export_btn.setProperty("class", "primary")
         self.export_btn.clicked.connect(self.run_analytics_report)
         top_bar_layout.addWidget(self.export_btn)
         
@@ -1171,31 +1154,29 @@ class ReportsAnalyticalHub(QWidget):
         try:
             with SessionLocal() as db:
                 if report_type == "high_freq":
-                    # 1. High Frequency Items
-                    # Calculate average days between requests for each item
-                    # This is a more complex query, let's simplify for the report for now
-                    # For a true average frequency, we'd need to get all request dates for each item
-                    # and calculate the average difference.
-                    
-                    # For now, let's get total quantity and count of requests
-                    high_freq_data = db.query(Item.id, Item.name, func.sum(RequestItem.quantity).label("total_qty"), func.count(RequestItem.id).label("request_count")) \
+                    # 1. Pending Demand Analysis (Formerly Highly Requested)
+                    # Filter only PENDING requests so "Lacking" reflects current backlog
+                    high_freq_data = db.query(Item.id, Item.name, Item.description, func.sum(RequestItem.quantity).label("total_qty"), func.count(RequestItem.id).label("request_count")) \
                         .join(RequestItem, Item.id == RequestItem.item_id) \
-                        .group_by(Item.id, Item.name).order_by(func.sum(RequestItem.quantity).desc()).all()
+                        .join(SupplyRequest, RequestItem.request_id == SupplyRequest.id) \
+                        .filter(SupplyRequest.status == "PENDING") \
+                        .group_by(Item.id, Item.name, Item.description).order_by(func.sum(RequestItem.quantity).desc()).all()
 
                     report_data = []
-                    for item_id, name, total_qty, request_count in high_freq_data:
+                    for item_id, name, description, total_qty, request_count in high_freq_data:
                         actual_stock = db.query(func.sum(Stock.quantity)).filter(Stock.item_id == item_id).scalar() or 0.0
                         total_qty_float = float(total_qty)
                         actual_stock_float = float(actual_stock)
                         lacking = max(0.0, total_qty_float - actual_stock_float)
-                        report_data.append((name, total_qty_float, int(request_count), actual_stock_float, lacking)) 
+                        report_data.append((name, description or "", total_qty_float, int(request_count), actual_stock_float, lacking)) 
                     
                     report_data.sort(key=lambda x: str(x[0]).lower())
                     
-                    filename = f"HIGH_FREQUENCY_ITEMS_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-                    headers = ["Item Name", "Total Quantity Requested", "Total Request Count", "Actual Stock", "Lacking"]
-                    filename = generate_html_report("📊 Highly Requested Items Analysis", headers, report_data, filename)
-                    self._handle_output(filename, "📊 Highly Requested Items Analysis", headers, report_data, export_format)
+                    filename = f"PENDING_DEMAND_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                    headers = ["Item Name", "Description", "Pending Qty Requested", "Current Request Count", "Actual Stock", "Lacking (Backlog)"]
+                    title = "⚠️ Pending Supply Demand Analysis"
+                    filename = generate_html_report(title, headers, report_data, filename)
+                    self._handle_output(filename, title, headers, report_data, export_format)
                     
                 elif report_type == "pending":
                     # 2. Pending Requests (Date <= Today)
@@ -1212,7 +1193,7 @@ class ReportsAnalyticalHub(QWidget):
                         emp_name = req.employee.name if req.employee else "N/A"
                         area = req.department.area_name if req.department else "N/A"
                         for ri in req.requested_items:
-                            report_data.append((date_str, emp_name, ri.item.name, ri.quantity, area, req.status))
+                            report_data.append((date_str, emp_name, ri.item.name, ri.item.description or "", ri.quantity, area, req.status))
                     
                     if not report_data:
                         QMessageBox.information(self, "No Data", "No pending requests found for current or past dates.")
@@ -1223,27 +1204,27 @@ class ReportsAnalyticalHub(QWidget):
                     report_data.sort(key=lambda x: str(x[2]).lower())
                         
                     filename = f"PENDING_REQUESTS_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-                    headers = ["Date", "Employee", "Item", "Quantity", "Area", "Status"]
-                    filename = generate_html_report("⏳ Pending & Today's Requests", headers, report_data, filename, status_col_idx=5)
+                    headers = ["Date", "Employee", "Item Name", "Description", "Quantity", "Area", "Status"]
+                    filename = generate_html_report("⏳ Pending & Today's Requests", headers, report_data, filename, status_col_idx=6)
                     self._handle_output(filename, "⏳ Pending & Today's Requests", headers, report_data, export_format)
                     
                 elif report_type == "behavior":
                     # 3. Consumption Analysis (Employee Behavior)
                     # Get all request items grouped by employee and item
-                    behavior_query = db.query(Employee.name, Item.name, SupplyRequest.request_date) \
+                    behavior_query = db.query(Employee.name, Item.name, Item.description, SupplyRequest.request_date) \
                         .join(SupplyRequest, Employee.id == SupplyRequest.employee_id) \
                         .join(RequestItem, SupplyRequest.id == RequestItem.request_id) \
                         .join(Item, RequestItem.item_id == Item.id) \
                         .order_by(Employee.name, Item.name, SupplyRequest.request_date).all()
                     
-                    groups = {} # (emp, item) -> [dates]
-                    for emp, item, date in behavior_query:
-                        key = (emp, item)
+                    groups = {} # (emp, item, desc) -> [dates]
+                    for emp, item, desc, date in behavior_query:
+                        key = (emp, item, desc)
                         if key not in groups: groups[key] = []
                         groups[key].append(date)
                     
                     report_data = []
-                    for (emp, item), dates in groups.items():
+                    for (emp, item, desc), dates in groups.items():
                         total_qty = db.query(func.sum(RequestItem.quantity)) \
                             .join(SupplyRequest, RequestItem.request_id == SupplyRequest.id) \
                             .join(Employee, SupplyRequest.employee_id == Employee.id) \
@@ -1258,12 +1239,12 @@ class ReportsAnalyticalHub(QWidget):
                         
                         freq_label = get_frequency_category(avg_gap)
                         gap_str = f"{avg_gap:.1f} days" if avg_gap is not None else "N/A"
-                        report_data.append((emp, item, float(total_qty), last_date, gap_str, freq_label))
+                        report_data.append((emp, item, desc or "", float(total_qty), last_date, gap_str, freq_label))
                     
                     report_data.sort(key=lambda x: str(x[1]).lower()) # Sort by item name
                     
                     filename = f"EMPLOYEE_BEHAVIOR_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-                    headers = ["Employee", "Item", "Total Qty", "Last Date", "Avg Days Between", "Frequency Classification"]
+                    headers = ["Employee", "Item Name", "Description", "Total Qty", "Last Date", "Avg Days Between", "Frequency Classification"]
                     filename = generate_html_report("🧠 Supply Consumption Analysis", headers, report_data, filename)
                     self._handle_output(filename, "🧠 Supply Consumption Analysis", headers, report_data, export_format)
                     
@@ -1327,14 +1308,14 @@ class ReportsAnalyticalHub(QWidget):
                 elif report_type in ["stock_summary", "need_restock", "distribution"]:
                     # from form_generator import generate_inventory_report # Removed, using generate_html_report
                     if report_type == "distribution":
-                        data = db.query(Item.name, Location.name, Stock.quantity, Item.unit, Item.standard_stock) \
+                        data = db.query(Item.name, Item.description, Location.name, Stock.quantity, Item.unit, Item.standard_stock) \
                             .join(Stock, Item.id == Stock.item_id) \
                             .join(Location, Stock.location_id == Location.id).all()
                         
                         report_data = []
-                        for name, loc, qty, unit, custom_t in data:
+                        for name, desc, loc, qty, unit, custom_t in data:
                             status = evaluate_stock_status(unit, qty, custom_t)
-                            report_data.append((name, loc, float(qty), unit, status))
+                            report_data.append((name, desc or "", loc, float(qty), unit, status))
                     else:
                         # Unify data source: Get items and their TOTAL stock across all locations
                         items_with_stock = db.query(Item, func.sum(Stock.quantity).label("total_qty")) \
@@ -1372,8 +1353,8 @@ class ReportsAnalyticalHub(QWidget):
                     fname = f"INVENTORY_{report_type.upper()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
                     
                     if report_type == "distribution":
-                        headers = ["Item Name", "Location", "Quantity", "Unit", "Status"]
-                        filename = generate_html_report(report_title, headers, report_data, fname, status_col_idx=4)
+                        headers = ["Item Name", "Description", "Location", "Quantity", "Unit", "Status"]
+                        filename = generate_html_report(report_title, headers, report_data, fname, status_col_idx=5)
                     else:
                         headers = ["Item Name", "Description", "Actual Stock", "Threshold (Standard)", "Unit"]
                         filename = generate_html_report(report_title, headers, report_data, fname)
@@ -1433,7 +1414,7 @@ class ReportSelectionDialog(QDialog):
         
         header_text = "📋 Inventory Analytics Report" if mode == "inventory" else "📋 Employee Behavior Report"
         header = QLabel(header_text)
-        header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2F3542;")
+        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #1E3A5F;")
         layout.addWidget(header)
         
         desc = QLabel("Please select the type of analytics report you wish to generate:")
@@ -1452,7 +1433,7 @@ class ReportSelectionDialog(QDialog):
             ]
         else:
             options = [
-                ("📊 Highly Requested Items", "high_freq"),
+                ("⚠️ Pending Supply Demand", "high_freq"),
                 ("⏳ Pending Requests (Past Due/Today)", "pending"),
                 ("🧠 Consumption Analysis (Employee Behavior)", "behavior"),
                 ("👤 Individual Employee History (Selected)", "individual_history"),

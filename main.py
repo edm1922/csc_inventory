@@ -16,8 +16,18 @@ from request_main import RequestTrackingApp
 from inventory_main import InventoryManager
 from purchase_main import PurchaseManager
 from reports_analytical_main import ReportsAnalyticalHub
-from quick_pull_main import QuickPullManager
+from quick_pull_main import InventoryTransactionHub
 from database import init_db
+from theme import apply_corporate_theme # NEW: Corporate Redesign
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 class MainMenu(QWidget):
     def __init__(self, parent_window):
@@ -29,12 +39,12 @@ class MainMenu(QWidget):
         
         # Header
         header = QLabel("SUPPLY & INVENTORY SYSTEM")
-        header.setStyleSheet("font-size: 32px; font-weight: bold; color: #1F4E78; margin-bottom: 20px;")
+        header.setObjectName("headerTitle")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.main_layout.addWidget(header)
         
         subheader = QLabel("Select a module to continue")
-        subheader.setStyleSheet("font-size: 18px; color: #555; margin-bottom: 40px;")
+        subheader.setStyleSheet("font-size: 14pt; color: #718096; margin-bottom: 30px;")
         subheader.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.main_layout.addWidget(subheader)
         
@@ -79,10 +89,10 @@ class MainMenu(QWidget):
         self.purchase_btn.clicked.connect(lambda: self.parent_window.switch_view(4))
         btn_layout.addWidget(self.purchase_btn)
         
-        # 5. Quick Pull Button (NEW)
+        # 5. Inventory Transactions (Consolidated)
         self.pull_btn = self.create_menu_button(
-            "⚡", "Quick Pull Log", 
-            "Fast item release log with auto-deduction.",
+            "🔄", "Inventory Transactions", 
+            "Unified log for all item releases (Pulls) and arrivals (In).",
             "#d35400"
         )
         self.pull_btn.clicked.connect(lambda: self.parent_window.switch_view(2))
@@ -92,27 +102,29 @@ class MainMenu(QWidget):
         
         # Footer
         footer = QLabel("System v2.0 - Developed for Inventory Efficiency")
-        footer.setStyleSheet("margin-top: 50px; color: #888; font-size: 12px;")
+        footer.setObjectName("statusReady")
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.main_layout.addWidget(footer)
 
     def create_menu_button(self, icon_char, title, description, color):
         btn = QPushButton()
-        btn.setFixedSize(260, 200) # Slightly smaller to fit 4
+        btn.setFixedSize(260, 200)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         
         btn_layout = QVBoxLayout(btn)
+        btn_layout.setContentsMargins(20, 20, 20, 20)
+        btn_layout.setSpacing(10)
         
         icon_lbl = QLabel(icon_char)
-        icon_lbl.setStyleSheet(f"font-size: 40px; color: {color}; background: transparent;")
+        icon_lbl.setStyleSheet(f"font-size: 44px; color: {color}; background: transparent;")
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         title_lbl = QLabel(title)
-        title_lbl.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color}; background: transparent;")
+        title_lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; color: #2D3748; background: transparent;")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         desc_lbl = QLabel(description)
-        desc_lbl.setStyleSheet("font-size: 11px; color: #666; background: transparent;")
+        desc_lbl.setStyleSheet("font-size: 11px; color: #718096; background: transparent;")
         desc_lbl.setWordWrap(True)
         desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
@@ -120,18 +132,19 @@ class MainMenu(QWidget):
         btn_layout.addWidget(title_lbl)
         btn_layout.addWidget(desc_lbl)
         
+        # CHANGED: Corporate Redesign with shadow-simulating border
         btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: white;
-                border: 2px solid #ddd;
-                border-radius: 15px;
+                border: 1px solid #E2E8F0;
+                border-radius: 12px;
             }}
             QPushButton:hover {{
                 border: 2px solid {color};
-                background-color: #f9f9f9;
+                background-color: #F7FAFC;
+                margin: -1px; /* Offset for border growth */
             }}
         """)
-        
         return btn
 
 class MainWindow(QMainWindow):
@@ -147,19 +160,19 @@ class MainWindow(QMainWindow):
         self.unified_request_view = RequestTrackingApp(mode="UNIFIED")
         self.inventory_view = InventoryManager()
         self.purchase_view = PurchaseManager()
-        self.quick_pull_view = QuickPullManager()
+        self.transactions_view = InventoryTransactionHub()
         self.reports_analytical_view = ReportsAnalyticalHub()
         
         # Add a "Back to Menu" button to the sub-views
         self.add_nav_bar(self.unified_request_view)
         self.add_nav_bar(self.inventory_view)
         self.add_nav_bar(self.purchase_view)
-        self.add_nav_bar(self.quick_pull_view)
+        self.add_nav_bar(self.transactions_view)
         self.add_nav_bar(self.reports_analytical_view)
         
         self.stack.addWidget(self.menu_view)               # 0
         self.stack.addWidget(self.unified_request_view)    # 1
-        self.stack.addWidget(self.quick_pull_view)         # 2
+        self.stack.addWidget(self.transactions_view)       # 2
         self.stack.addWidget(self.inventory_view)          # 3
         self.stack.addWidget(self.purchase_view)           # 4
         self.stack.addWidget(self.reports_analytical_view) # 5
@@ -176,19 +189,20 @@ class MainWindow(QMainWindow):
             super().keyPressEvent(event)
 
     def add_nav_bar(self, widget):
-        if widget.layout():
             nav_layout = QHBoxLayout()
             back_btn = QPushButton("⬅ Back to Main Menu")
+            back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             back_btn.setStyleSheet("""
                 QPushButton {
-                    background-color: #ecf0f1;
-                    padding: 5px 15px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    color: #2c3e50;
+                    background-color: #EDF2F7;
+                    padding: 8px 20px;
+                    border-radius: 6px;
+                    font-weight: 600;
+                    color: #4A5568;
                 }
                 QPushButton:hover {
-                    background-color: #bdc3c7;
+                    background-color: #E2E8F0;
+                    color: #1E3A5F;
                 }
             """)
             back_btn.clicked.connect(lambda: self.switch_view(0))
@@ -202,7 +216,7 @@ class MainWindow(QMainWindow):
             self.unified_request_view.load_dropdowns()
             self.unified_request_view.refresh_table()
         elif index == 2:
-            self.quick_pull_view.load_logs()
+            self.transactions_view.load_logs()
         elif index == 3:
             self.inventory_view.load_data()
         elif index == 4:
@@ -213,9 +227,11 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     init_db()
     app = QApplication(sys.argv)
+    
+    # CHANGED: Applying Corporate Design System
     app.setStyle("Fusion")
-    font = QFont("Segoe UI", 10)
-    app.setFont(font)
+    apply_corporate_theme(app)
+    
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

@@ -1,12 +1,25 @@
+import sys
 import os
 from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, DateTime, ForeignKey, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, validates
 
+def get_app_root():
+    """Returns the root directory of the application, handling PyInstaller bundling."""
+    if getattr(sys, 'frozen', False):
+        # Running from executable
+        return os.path.dirname(sys.executable)
+    # Running from source
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # Setup Database connection
-current_dir = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.abspath(os.path.join(current_dir, "..", "data", "supply_system.db"))
-engine = create_engine(f"sqlite:///{DB_FILE}", echo=False)
+APP_ROOT = get_app_root()
+DATA_DIR = os.path.join(APP_ROOT, "data")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+DB_FILE = os.path.join(DATA_DIR, "supply_system.db")
+engine = create_engine(f"sqlite:///{DB_FILE.replace('\\', '/')}", echo=False)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
@@ -56,6 +69,8 @@ class Item(Base):
     request_items = relationship("RequestItem", back_populates="item", cascade="all, delete-orphan")
     stocks = relationship("Stock", back_populates="item", cascade="all, delete-orphan")
     quick_pull_items = relationship("QuickPullItem", back_populates="item", cascade="all, delete-orphan")
+    stock_in_items = relationship("StockInItem", back_populates="item", cascade="all, delete-orphan")
+    tracking_items = relationship("TrackingItem", back_populates="item", cascade="all, delete-orphan")
 
 class Stock(Base):
     __tablename__ = "stocks"
@@ -170,6 +185,51 @@ class QuickPullItem(Base):
 
     quick_pull_log = relationship("QuickPullLog", back_populates="pulled_items")
     item = relationship("Item", back_populates="quick_pull_items")
+
+class TrackingLog(Base):
+    __tablename__ = "tracking_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    requested_by = Column(String, nullable=False)
+    purpose = Column(String, nullable=True)
+    destination = Column(String, nullable=True)
+    source_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    serial_number = Column(String, nullable=True)
+    asset_tag = Column(String, nullable=True)
+    
+    source_location = relationship("Location")
+    tracked_items = relationship("TrackingItem", back_populates="tracking_log", cascade="all, delete-orphan")
+
+class TrackingItem(Base):
+    __tablename__ = "tracking_items"
+    id = Column(Integer, primary_key=True, index=True)
+    log_id = Column(Integer, ForeignKey("tracking_logs.id"), nullable=False)
+    item_id = Column(Integer, ForeignKey("items.id"), nullable=False)
+    quantity = Column(Float, nullable=False)
+
+    tracking_log = relationship("TrackingLog", back_populates="tracked_items")
+    item = relationship("Item", back_populates="tracking_items")
+
+class StockInLog(Base):
+    __tablename__ = "stock_in_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    received_by = Column(String, nullable=False)
+    source_remarks = Column(String, nullable=True)
+    dest_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    
+    dest_location = relationship("Location")
+    added_items = relationship("StockInItem", back_populates="stock_in_log", cascade="all, delete-orphan")
+
+class StockInItem(Base):
+    __tablename__ = "stock_in_items"
+    id = Column(Integer, primary_key=True, index=True)
+    log_id = Column(Integer, ForeignKey("stock_in_logs.id"), nullable=False)
+    item_id = Column(Integer, ForeignKey("items.id"), nullable=False)
+    quantity = Column(Float, nullable=False)
+
+    stock_in_log = relationship("StockInLog", back_populates="added_items")
+    item = relationship("Item", back_populates="stock_in_items")
 
 class InventoryActionLog(Base):
     __tablename__ = "inventory_action_logs"
@@ -353,6 +413,59 @@ def init_db():
                 FOREIGN KEY(pr_id) REFERENCES purchase_requests(id)
             )
         """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stock_in_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATETIME NOT NULL,
+                received_by TEXT NOT NULL,
+                source_remarks TEXT,
+                dest_location_id INTEGER NOT NULL,
+                FOREIGN KEY(dest_location_id) REFERENCES locations(id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stock_in_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_id INTEGER NOT NULL,
+                item_id INTEGER NOT NULL,
+                quantity REAL NOT NULL,
+                FOREIGN KEY(log_id) REFERENCES stock_in_logs(id),
+                FOREIGN KEY(item_id) REFERENCES items(id)
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tracking_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATETIME NOT NULL,
+                requested_by TEXT NOT NULL,
+                purpose TEXT,
+                destination TEXT,
+                source_location_id INTEGER NOT NULL,
+                serial_number TEXT,
+                asset_tag TEXT,
+                FOREIGN KEY(source_location_id) REFERENCES locations(id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tracking_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_id INTEGER NOT NULL,
+                item_id INTEGER NOT NULL,
+                quantity REAL NOT NULL,
+                FOREIGN KEY(log_id) REFERENCES tracking_logs(id),
+                FOREIGN KEY(item_id) REFERENCES items(id)
+            )
+        """)
+        
+        # Migration: Add serial_number and asset_tag to tracking_logs if missing
+        try:
+            cursor.execute("ALTER TABLE tracking_logs ADD COLUMN serial_number TEXT")
+        except sqlite3.OperationalError: pass
+        try:
+            cursor.execute("ALTER TABLE tracking_logs ADD COLUMN asset_tag TEXT")
+        except sqlite3.OperationalError: pass
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS inventory_action_logs (

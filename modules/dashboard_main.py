@@ -5,8 +5,10 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QDialog, QFormLayout, QMessageBox)
 from PyQt6.QtCore import Qt, QRectF, QTimer
 from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QBrush
+from PyQt6.QtWidgets import QGraphicsDropShadowEffect
 import os
 import webbrowser
+from theme import CHART_COLORS # NEW: Corporate Redesign
 
 from core.database import SessionLocal, Item, Stock, Location
 from core.config import evaluate_stock_status, get_effective_threshold
@@ -27,9 +29,6 @@ class FilteredReportDialog(QDialog):
         
         self.category_cb = QComboBox()
         self.category_cb.addItems(["Need Restock", "Stock Sufficient", "All Categories"])
-        self.category_cb.setStyleSheet("""
-            QComboBox { padding: 5px; border: 1px solid #bdc3c7; border-radius: 3px; background: white; color: black; }
-        """)
         self.category_cb.currentTextChanged.connect(self.load_preview)
         filter_layout.addWidget(self.category_cb)
         
@@ -45,7 +44,6 @@ class FilteredReportDialog(QDialog):
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(["Item Name", "Description", "Quantity", "Unit", "Threshold", "Location"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setStyleSheet("QTableWidget { background: white; color: black; }")
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.main_layout.addWidget(self.table)
         
@@ -56,12 +54,8 @@ class FilteredReportDialog(QDialog):
         self.print_btn.clicked.connect(self.generate_excel)
         
         self.html_btn = QPushButton("📄 Preview HTML")
-        self.html_btn.setStyleSheet("padding: 8px; background-color: #2980b9; color: white; font-weight: bold; border-radius: 4px;")
         self.html_btn.clicked.connect(self.generate_html_report)
-        
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        cancel_btn.setStyleSheet("padding: 8px;")
+        self.html_btn.setStyleSheet("background-color: #2C7A7B;")
         
         btn_layout.addStretch()
         btn_layout.addWidget(cancel_btn)
@@ -257,16 +251,18 @@ class PieChart(QFrame):
         total = sum([val for val, color, label in self.data])
         if total == 0:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#ecf0f1"))
+            painter.setBrush(QColor("#EDF2F7"))
             painter.drawEllipse(pie_rect)
-            painter.setPen(Qt.GlobalColor.black)
+            painter.setPen(QColor("#718096"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No Data")
             return
             
         start_angle = 0
-        for val, color, label in self.data:
-            span_angle = (val / total) * 360 * 16 # 1/16th of a degree
-            painter.setBrush(QColor(color))
+        for i, (val, color, label) in enumerate(self.data):
+            # CHANGED: Use CHART_COLORS if color is generic
+            c = CHART_COLORS[i % len(CHART_COLORS)] if color in ["#e74c3c", "#27ae60", "#3498db"] else color
+            span_angle = (val / total) * 360 * 16 
+            painter.setBrush(QColor(c))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPie(pie_rect, int(start_angle), int(span_angle))
             start_angle += span_angle
@@ -274,12 +270,13 @@ class PieChart(QFrame):
         # Draw legend
         leg_x = x + size + 20
         leg_y = y + 20
-        painter.setPen(Qt.GlobalColor.black)
+        painter.setPen(QColor("#2D3748"))
         font = painter.font()
         font.setPointSize(9)
         painter.setFont(font)
-        for val, color, label in self.data:
-            painter.setBrush(QColor(color))
+        for i, (val, color, label) in enumerate(self.data):
+            c = CHART_COLORS[i % len(CHART_COLORS)] if color in ["#e74c3c", "#27ae60", "#3498db"] else color
+            painter.setBrush(QColor(c))
             painter.drawRect(int(leg_x), int(leg_y), 12, 12)
             painter.drawText(int(leg_x + 20), int(leg_y + 11), f"{label} ({val})")
             leg_y += 25
@@ -334,16 +331,17 @@ class BarChart(QFrame):
         available_height = rect.height() - margin_y * 2 - 20 # 20 for label
         
         x = margin_x + spacing
-        for val, color, label in self.data:
+        for i, (val, color, label) in enumerate(self.data):
+            c = CHART_COLORS[i % len(CHART_COLORS)] if color == "#3498db" else color
             bar_height = (val / max_val) * available_height
             y = rect.height() - margin_y - bar_height
             
-            painter.setBrush(QColor(color))
+            painter.setBrush(QColor(c))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRect(int(x), int(y), int(bar_width), int(bar_height))
             
             # draw label
-            painter.setPen(Qt.GlobalColor.black)
+            painter.setPen(QColor("#4A5568"))
             font.setPointSize(9)
             painter.setFont(font)
             text_width = painter.fontMetrics().horizontalAdvance(str(label))
@@ -361,26 +359,27 @@ class BarChart(QFrame):
 class HighlightCard(QFrame):
     def __init__(self, title, value, color):
         super().__init__()
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: white;
-                border: 1px solid #ecf0f1;
-                border-top: 5px solid {color};
-                border-radius: 5px;
-            }}
-        """)
+        self.setProperty("class", "card")
         self.setFixedSize(200, 100)
+        
+        # CHANGED: Corporate Shadow Effect
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(15)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        self.setGraphicsEffect(shadow)
         
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setContentsMargins(10, 10, 10, 10)
         
         self.title_lbl = QLabel(title)
-        self.title_lbl.setStyleSheet("color: #7f8c8d; font-size: 14px; font-weight: bold; background: transparent; border: none;")
+        self.title_lbl.setStyleSheet(f"color: #718096; font-size: 11px; font-weight: bold; background: transparent;")
         self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.val_lbl = QLabel(str(value))
-        self.val_lbl.setStyleSheet(f"color: {color}; font-size: 32px; font-weight: bold; background: transparent; border: none;")
+        self.val_lbl.setStyleSheet(f"color: #1E3A5F; font-size: 28px; font-weight: bold; background: transparent;")
         self.val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         layout.addWidget(self.title_lbl)
@@ -393,14 +392,13 @@ class SmartDashboard(QWidget):
     def __init__(self):
         super().__init__()
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setSpacing(15)
-        self.main_layout.setContentsMargins(20, 20, 20, 20)
-        self.setStyleSheet("background-color: #f5f6fa;")
+        self.main_layout.setSpacing(25)
+        self.main_layout.setContentsMargins(30, 30, 30, 30)
         
         # Header
         header_layout = QHBoxLayout()
         title = QLabel("Smart Inventory Analysis")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #2c3e50; background: transparent;")
+        title.setObjectName("headerTitle")
         header_layout.addWidget(title)
         
         header_layout.addStretch()
@@ -424,30 +422,12 @@ class SmartDashboard(QWidget):
         header_layout.addWidget(self.loc_cb)
         
         self.report_btn = QPushButton("📑 Generate Report")
-        self.report_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 15px;
-                background-color: #8e44ad;
-                color: white;
-                font-weight: bold;
-                border-radius: 5px;
-            }
-            QPushButton:hover { background-color: #9b59b6; }
-        """)
+        self.report_btn.setStyleSheet("background-color: #805AD5;") # Purple accent
         self.report_btn.clicked.connect(self.open_report_dialog)
         header_layout.addWidget(self.report_btn)
         
-        refresh_btn = QPushButton("🔄 Refresh")
-        refresh_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 15px;
-                background-color: #3498db;
-                color: white;
-                font-weight: bold;
-                border-radius: 5px;
-            }
-            QPushButton:hover { background-color: #2980b9; }
-        """)
+        refresh_btn.clicked.connect(self.load_data)
+        header_layout.addWidget(refresh_btn)
         refresh_btn.clicked.connect(self.load_data)
         header_layout.addWidget(refresh_btn)
         

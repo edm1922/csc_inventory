@@ -2,22 +2,24 @@ import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QComboBox, QCheckBox, QPushButton, QTableWidget, 
                              QTableWidgetItem, QMessageBox, QHeaderView, QGroupBox, QFormLayout, 
-                             QDialog, QDateEdit, QListWidget, QScrollArea, QFrame, QProgressBar,
-                             QDialogButtonBox)
-from PyQt6.QtCore import Qt, QDate, QTimer
-from PyQt6.QtGui import QIntValidator, QDoubleValidator, QColor, QBrush
+                             QDialog, QDateEdit, QListWidget, QScrollArea, QFrame, QCompleter)
+from PyQt6.QtCore import Qt, QDate, QTimer, QStringListModel
+from PyQt6.QtGui import QDoubleValidator, QColor, QBrush
 
 # Import backend logic
 from database import (SessionLocal, Employee, SupplyRequest, Item, Department, 
                       RequestItem, Stock, Location, parse_frequency, normalize_frequency)
-from exporter import export_to_excel
-from form_generator import generate_blank_form, generate_populated_report, generate_consumption_report
+
 from sqlalchemy.orm import joinedload
 from sqlalchemy import func
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 from core.google_sync_service import GoogleSyncService, parse_item_requested
+
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
 
 # Load environment variables
 load_dotenv()
@@ -124,7 +126,7 @@ class GoogleSyncInboxDialog(QDialog):
             
             # Approve Button
             approve_btn = QPushButton("✅ Approve")
-            approve_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+            approve_btn.setProperty("class", "primary")
             approve_btn.clicked.connect(lambda checked, r=row, i=idx, cb=source_combo: self.approve_request(r, i, cb))
             self.table.setCellWidget(idx, 5, approve_btn)
             
@@ -300,6 +302,7 @@ class EditRequestItemDialog(QDialog):
         
         btns = QHBoxLayout()
         save_btn = QPushButton("Save Changes")
+        save_btn.setProperty("class", "primary")
         save_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
@@ -469,24 +472,22 @@ class EmployeeDetailsDialog(QDialog):
         
         btn_row = QHBoxLayout()
         self.add_btn = QPushButton("&Add New Item")
+        self.add_btn.setProperty("class", "primary")
         self.add_btn.clicked.connect(self.add_new_request_item)
-        self.add_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
         
-        self.edit_btn = QPushButton("&Edit Selected Request")
+        self.edit_btn = QPushButton("&Edit Selected")
+        self.edit_btn.setProperty("class", "secondary")
         self.edit_btn.clicked.connect(self.edit_selected_request)
+        
         self.delete_btn = QPushButton("&Delete Selected")
+        self.delete_btn.setProperty("class", "danger")
         self.delete_btn.clicked.connect(self.delete_selected_request)
-        self.delete_btn.setStyleSheet("color: #c0392b; font-weight: bold;")
         
         btn_row.addWidget(self.add_btn)
         btn_row.addWidget(self.edit_btn)
         btn_row.addWidget(self.delete_btn)
         layout.addLayout(btn_row)
 
-        self.print_btn = QPushButton("&Export/Print History to Excel")
-        self.print_btn.clicked.connect(self.run_print_history)
-        layout.addWidget(self.print_btn)
-        
         self.load_data()
 
     def load_data(self):
@@ -597,15 +598,21 @@ class EmployeeDetailsDialog(QDialog):
                 self.table.setItem(row_idx, 6, QTableWidgetItem(req.frequency or ""))
                 
                 # --- NEW: STATUS MARKING SYSTEM FOR CUSTODIAN ---
-                status_btn = QPushButton(req.supply_request.status or "PENDING")
+                status_val = req.supply_request.status or "PENDING"
+                # Handle both FULFILLED and old DONE/DELIVERED statuses as "undoable"
+                is_fulfilled = status_val in ["FULFILLED", "DONE", "DELIVERED"]
+                
+                status_btn = QPushButton("🔄 Undo" if is_fulfilled else status_val)
                 status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 
                 # Dynamic Styling based on Status
-                if req.supply_request.status == "FULFILLED":
+                if is_fulfilled:
                     status_btn.setStyleSheet("background-color: #c8e6c9; color: #2e7d32; font-weight: bold; border-radius: 4px;")
-                    status_btn.setEnabled(False) # Locked once fulfilled
+                    status_btn.setToolTip("Click to undo fulfillment and restore stock.")
                 else:
-                    status_btn.clicked.connect(lambda checked, r=req: self.mark_as_fulfilled(r))
+                    status_btn.setStyleSheet("background-color: #ffcdd2; color: #b71c1c; font-weight: bold; border-radius: 4px;")
+                
+                status_btn.clicked.connect(lambda checked, r=req: self.mark_as_fulfilled(r))
                 self.table.setCellWidget(row_idx, 7, status_btn)
                 
                 # Set Request ID in Hidden Column (index 8)
@@ -619,56 +626,73 @@ class EmployeeDetailsDialog(QDialog):
         self.table.blockSignals(False)
 
     def mark_as_fulfilled(self, request_item):
-        """Marks a request as fulfilled and deducts stock with safeguards."""
-        ans = QMessageBox.question(self, "Confirm Fulfillment", 
-                                 f"Mark '{request_item.item.name}' as FULFILLED and deduct quantity from inventory?",
-                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        
-        if ans != QMessageBox.StandardButton.Yes: return
-
+        """Toggles fulfillment status: Marks as FULFILLED/Deducts stock OR Restores to PENDING/Returns stock."""
         with SessionLocal() as session:
             try:
                 # Re-fetch from DB to ensure fresh state
                 req_item = session.query(RequestItem).options(
                     joinedload(RequestItem.supply_request),
-                    joinedload(RequestItem.item)
+                    joinedload(RequestItem.item),
+                    joinedload(RequestItem.supply_request).joinedload(SupplyRequest.source_location)
                 ).get(request_item.id)
                 
-                if req_item.supply_request.status == "FULFILLED":
-                    QMessageBox.warning(self, "Already Fulfilled", "This request has already been processed.")
-                    return
+                current_status = req_item.supply_request.status
+                is_undoing = current_status in ["FULFILLED", "DONE", "DELIVERED"]
 
-                # Check Inventory Safeguard
-                source_id = req_item.supply_request.source_location_id
-                stock = session.query(Stock).filter_by(item_id=req_item.item_id, location_id=source_id).first()
-                
-                current_qty = stock.quantity if stock else 0.0
-                if current_qty < req_item.quantity:
-                    QMessageBox.warning(self, "Insufficient Stock", 
-                                       f"Cannot fulfill: Only {current_qty} units available at the selected source.\n"
-                                       f"Quantity Needed: {req_item.quantity}\n\n"
-                                       "Please restock the inventory source first.")
-                    return
+                if is_undoing:
+                    ans = QMessageBox.question(self, "Undo Fulfillment?", 
+                                             f"Restore '{req_item.item.name}' to PENDING?\n\n"
+                                             f"This will ADD {req_item.quantity} units back to {req_item.supply_request.source_location.name}.",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if ans != QMessageBox.StandardButton.Yes: return
 
-                # Deduct Stock
-                if stock:
-                    stock.quantity -= req_item.quantity
+                    # Add stock back
+                    source_id = req_item.supply_request.source_location_id
+                    stock = session.query(Stock).filter_by(item_id=req_item.item_id, location_id=source_id).first()
+                    if stock:
+                        stock.quantity += req_item.quantity
+                    else:
+                        new_stock = Stock(item_id=req_item.item_id, location_id=source_id, quantity=req_item.quantity)
+                        session.add(new_stock)
+                    
+                    req_item.supply_request.status = "PENDING"
+                    msg = "Fulfillment undone. Stock has been restored."
                 else:
-                    # Defensive: Should theoretically be caught by qty check above
-                    new_stock = Stock(item_id=req_item.item_id, location_id=source_id, quantity=-req_item.quantity)
-                    session.add(new_stock)
+                    ans = QMessageBox.question(self, "Confirm Fulfillment", 
+                                             f"Mark '{req_item.item.name}' as FULFILLED and deduct quantity from inventory?",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if ans != QMessageBox.StandardButton.Yes: return
 
-                # Update Status
-                req_item.supply_request.status = "FULFILLED"
+                    # Check Inventory Safeguard
+                    source_id = req_item.supply_request.source_location_id
+                    stock = session.query(Stock).filter_by(item_id=req_item.item_id, location_id=source_id).first()
+                    
+                    current_qty = stock.quantity if stock else 0.0
+                    if current_qty < req_item.quantity:
+                        QMessageBox.warning(self, "Insufficient Stock", 
+                                           f"Cannot fulfill: Only {current_qty} units available at the selected source.\n"
+                                           f"Quantity Needed: {req_item.quantity}\n\n"
+                                           "Please restock the inventory source first.")
+                        return
+
+                    # Deduct Stock
+                    if stock:
+                        stock.quantity -= req_item.quantity
+                    else:
+                        new_stock = Stock(item_id=req_item.item_id, location_id=source_id, quantity=-req_item.quantity)
+                        session.add(new_stock)
+
+                    req_item.supply_request.status = "FULFILLED"
+                    msg = "Request fulfilled! Inventory updated."
+
                 session.commit()
-                
-                QMessageBox.information(self, "Success", "Request fulfilled! Inventory updated.")
+                QMessageBox.information(self, "Success", msg)
                 self.load_data()
                 if self.parent(): self.parent().refresh_table()
                 
             except Exception as e:
                 session.rollback()
-                QMessageBox.critical(self, "Error", f"Fulfillment failed: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Action failed: {str(e)}")
 
     def resolve_item_mismatch(self, request_item_id, combo_box, selected_name=None):
         """Updates the RequestItem's linked item when a suggestion is picked."""
@@ -789,49 +813,6 @@ class EmployeeDetailsDialog(QDialog):
                 QMessageBox.critical(self, "Database Error", f"Failed to save change:\n{str(e)}")
                 self.load_data()
 
-
-    def run_print_history(self):
-        """Generates a professional Excel report for this specific employee."""
-        with SessionLocal() as session:
-            # Query all items for this employee to get metadata (role, area, etc.)
-            requests = session.query(RequestItem).join(SupplyRequest).filter(
-                SupplyRequest.employee_id == self.employee_id
-            ).options(
-                joinedload(RequestItem.item),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.employee),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department)
-            ).order_by(RequestItem.id.desc()).all()
-
-            if not requests:
-                QMessageBox.warning(self, "No Data", "No history found for this employee.")
-                return
-
-            # Extract metadata from the most recent request
-            latest = requests[0]
-            role = latest.supply_request.department.role or ""
-            area = latest.supply_request.department.area_name or "Unknown"
-            shift = latest.supply_request.department.shift or ""
-            supervisor = latest.supply_request.department.supervisor or ""
-
-            # Format data for the generator
-            data_rows = []
-            for r in requests:
-                data_rows.append((
-                    r.supply_request.request_date.strftime("%Y-%m-%d"),
-                    r.item.name,
-                    r.quantity,
-                    "N/A", # is_refill_request is removed
-                    r.frequency or ""
-                ))
-
-            try:
-                filename = generate_populated_report(
-                    self.windowTitle().replace("Request History: ", ""),
-                    role, area, shift, supervisor, data_rows
-                )
-                QMessageBox.information(self, "Success", f"Professional report generated: {filename}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to generate report:\n{str(e)}")
 
     def edit_selected_request(self):
         """Opens a comprehensive dialog to edit all fields of the selected request."""
@@ -1039,23 +1020,25 @@ class EmployeeDetailsDialog(QDialog):
                     QMessageBox.critical(self, "Error", f"Failed to delete requests: {str(e)}")
 
 class PendingRequestsDialog(QDialog):
-    """A unified dashboard for custodians to view and fulfill ALL pending requests."""
+    """A unified dashboard for custodians to view FULFILLED issuance log requests."""
     def __init__(self, mode="SATELLITE", parent=None):
         super().__init__(parent)
         self.mode = mode
-        self.setWindowTitle("📦 Pending Deliveries Dashboard")
+        self.setWindowTitle("📋 Issuance Log Dashboard")
         self.setMinimumSize(1000, 600)
         
         layout = QVBoxLayout(self)
         
         # Header
         header = QHBoxLayout()
-        title = QLabel("Outstanding Supply Requests")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
+        title = QLabel("Supply Issuance Log")
+        title.setObjectName("headerTitle")
+        title.setStyleSheet("#headerTitle { font-size: 20px; font-weight: bold; color: #1E3A5F; }")
         header.addWidget(title)
         
         header.addStretch()
         self.refresh_btn = QPushButton("🔄 Refresh List")
+        self.refresh_btn.setProperty("class", "secondary")
         self.refresh_btn.clicked.connect(self.load_data)
         header.addWidget(self.refresh_btn)
         layout.addLayout(header)
@@ -1069,12 +1052,25 @@ class PendingRequestsDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setColumnHidden(7, True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         layout.addWidget(self.table)
         
         footer = QHBoxLayout()
-        hint = QLabel("<i>Note: Fulfilling an item automatically deducts stock from the selected source.</i>")
+        hint = QLabel("<i>Note: Fulfilling items must be done from the main employee dashboard now. This log shows finalized issuances.</i>")
         footer.addWidget(hint)
         footer.addStretch()
+        
+        self.print_btn = QPushButton("🖨️ Print Issuance Log")
+        self.print_btn.setStyleSheet("background-color: #1565C0; color: white; font-weight: bold;")
+        self.print_btn.clicked.connect(self.print_issuance_log)
+        footer.addWidget(self.print_btn)
+        
+        self.bulk_undo_btn = QPushButton("⏪ Bulk Undo Selected")
+        self.bulk_undo_btn.setStyleSheet("background-color: #ef6c00; color: white; font-weight: bold;")
+        self.bulk_undo_btn.clicked.connect(lambda: self.batch_fulfill(action='UNDO'))
+        footer.addWidget(self.bulk_undo_btn)
+        
         self.close_btn = QPushButton("Close")
         self.close_btn.clicked.connect(self.accept)
         footer.addWidget(self.close_btn)
@@ -1085,20 +1081,18 @@ class PendingRequestsDialog(QDialog):
     def load_data(self):
         self.table.setRowCount(0)
         with SessionLocal() as session:
-            # Query all PENDING request items for the current office mode
+            # Query recent request items for the current office mode (both Pending and Fulfilled)
             target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
             
-            pending_items = session.query(RequestItem).join(SupplyRequest).join(Location, SupplyRequest.dest_location_id == Location.id).filter(
-                SupplyRequest.status == "PENDING",
-                Location.name == target_loc_name
+            # Show requests from the last 200 entries for performance/relevance
+            activity_items = session.query(RequestItem).join(SupplyRequest).join(Location, SupplyRequest.dest_location_id == Location.id).filter(
+                Location.name == target_loc_name,
+                SupplyRequest.status.in_(["FULFILLED", "DONE", "DELIVERED"])
             ).options(
-                joinedload(RequestItem.item),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.employee),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department),
                 joinedload(RequestItem.supply_request).joinedload(SupplyRequest.source_location)
-            ).order_by(SupplyRequest.request_date.desc()).all()
+            ).order_by(SupplyRequest.request_date.desc()).limit(200).all()
             
-            for row_idx, ri in enumerate(pending_items):
+            for row_idx, ri in enumerate(activity_items):
                 self.table.insertRow(row_idx)
                 
                 date_str = ri.supply_request.request_date.strftime("%Y-%m-%d")
@@ -1113,394 +1107,341 @@ class PendingRequestsDialog(QDialog):
                 self.table.setItem(row_idx, 4, QTableWidgetItem(f"{ri.quantity:.2f}"))
                 self.table.setItem(row_idx, 5, QTableWidgetItem(ri.supply_request.source_location.name))
                 
-                # Fulfill Button
-                btn = QPushButton("Mark Fulfilled")
-                btn.setStyleSheet("background-color: #27ae60; color: white; border-radius: 4px; padding: 4px; font-weight: bold;")
+                # Fulfill / Undo Button
+                status_val = ri.supply_request.status or "PENDING"
+                is_fulfilled = status_val in ["FULFILLED", "DONE", "DELIVERED"]
+                
+                btn = QPushButton("🔄 Undo Fulfillment")
+                btn.setStyleSheet("background-color: #ef6c00; color: white; font-weight: bold; border-radius: 4px;")
+                btn.setToolTip("Click to undo fulfillment and restore stock.")
+                
                 btn.clicked.connect(lambda checked, item=ri: self.fulfill_item(item))
                 self.table.setCellWidget(row_idx, 6, btn)
                 
                 self.table.setItem(row_idx, 7, QTableWidgetItem(str(ri.id)))
 
-    def fulfill_item(self, ri):
-        """Standardized fulfillment logic with stock deduction."""
-        ans = QMessageBox.question(self, "Confirm Delivery", 
-                                 f"Deliver {ri.quantity} {ri.item.name} to {ri.supply_request.employee.name}?\n"
-                                 f"Source: {ri.supply_request.source_location.name}",
+    def print_issuance_log(self):
+        data_list = []
+        for row in range(self.table.rowCount()):
+            data_list.append({
+                "date": self.table.item(row, 0).text(),
+                "employee": self.table.item(row, 1).text(),
+                "department": self.table.item(row, 2).text(),
+                "item": self.table.item(row, 3).text(),
+                "qty": self.table.item(row, 4).text(),
+                "source": self.table.item(row, 5).text()
+            })
+            
+        if not data_list:
+            QMessageBox.warning(self, "No Data", "There is no issuance data to print.")
+            return
+            
+        filename = f"ISSUANCE_LOG_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
+        try:
+            c = canvas.Canvas(filename, pagesize=landscape(letter))
+            width, height = landscape(letter)
+            
+            c.setFont("Helvetica-Bold", 16)
+            c.drawCentredString(width/2, height - 40, "SUPPLY ISSUANCE LOG")
+            
+            c.setFont("Helvetica-Bold", 10)
+            y = height - 80
+            
+            # Headers
+            c.drawString(40, y, "Date")
+            c.drawString(120, y, "Employee")
+            c.drawString(280, y, "Department/Area")
+            c.drawString(450, y, "Item Description")
+            c.drawString(630, y, "Qty Released")
+            c.drawString(700, y, "Fulfillment Source")
+            
+            y -= 15
+            c.line(40, y + 5, width - 40, y + 5)
+            y -= 15
+            
+            c.setFont("Helvetica", 9)
+            for item in data_list:
+                if y < 80: # Leave more space for summary if near end
+                    c.showPage()
+                    c.setFont("Helvetica-Bold", 10)
+                    y = height - 50
+                    c.drawString(40, y, "Date")
+                    c.drawString(120, y, "Employee")
+                    c.drawString(280, y, "Department/Area")
+                    c.drawString(450, y, "Item Description")
+                    c.drawString(630, y, "Qty Released")
+                    c.drawString(700, y, "Fulfillment Source")
+                    y -= 15
+                    c.line(40, y + 5, width - 40, y + 5)
+                    y -= 15
+                    c.setFont("Helvetica", 9)
+                
+                # Truncate strings to fit
+                emp = item["employee"][:25] + "..." if len(item["employee"]) > 25 else item["employee"]
+                dept = item["department"][:25] + "..." if len(item["department"]) > 25 else item["department"]
+                itm = item["item"][:35] + "..." if len(item["item"]) > 35 else item["item"]
+                
+                c.drawString(40, y, item["date"])
+                c.drawString(120, y, emp)
+                c.drawString(280, y, dept)
+                c.drawString(450, y, itm)
+                c.drawString(630, y, item["qty"])
+                c.drawString(700, y, item["source"])
+                y -= 20
+
+            # --- Aggregated Summary Section ---
+            # 1. Calculate Summary Totals
+            item_summary = {}
+            for item in data_list:
+                name = item["item"]
+                qty = float(item["qty"])
+                if name not in item_summary:
+                    item_summary[name] = {"released": 0.0, "lacking": 0.0}
+                item_summary[name]["released"] += qty
+
+            # 2. Query DB for Lacking (Pending) counts
+            target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
+            with SessionLocal() as session:
+                pending_items = session.query(Item.name, Item.description, func.sum(RequestItem.quantity)) \
+                    .join(RequestItem).join(SupplyRequest).join(Location, SupplyRequest.dest_location_id == Location.id) \
+                    .filter(Location.name == target_loc_name) \
+                    .filter(SupplyRequest.status.in_([None, "PENDING"])) \
+                    .group_by(Item.name, Item.description).all()
+                
+                lacking_map = {}
+                for name, desc, total_qty in pending_items:
+                    display = f"{name} ({desc})" if desc else name
+                    lacking_map[display] = float(total_qty or 0.0)
+                
+                for display in item_summary:
+                    item_summary[display]["lacking"] = lacking_map.get(display, 0.0)
+
+            # 3. Draw Summary Table
+            y -= 20
+            if y < 150:
+                c.showPage()
+                y = height - 50
+            
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(40, y, "SUMMARY OF REQUESTS & ISSUANCES")
+            y -= 20
+            
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(40, y, "Item Description")
+            c.drawString(450, y, "Total Released")
+            c.drawString(580, y, "Total Lacking (Pending)")
+            y -= 5
+            c.line(40, y, width - 40, y)
+            y -= 20
+            
+            c.setFont("Helvetica", 10)
+            # Sort items by name for readability
+            for display in sorted(item_summary.keys()):
+                if y < 50:
+                    c.showPage()
+                    y = height - 50
+                
+                c.drawString(40, y, display)
+                c.drawString(450, y, f"{item_summary[display]['released']:.2f}")
+                c.drawString(580, y, f"{item_summary[display]['lacking']:.2f}")
+                y -= 15
+
+            # --- Transmittal Signatures ---
+            y -= 40
+            if y < 100:
+                c.showPage()
+                y = height - 80
+            
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(50, y, "Prepared by:")
+            c.drawString(320, y, "Checked by/Released by:")
+            c.drawString(590, y, "Received by:")
+            
+            y -= 40
+            c.line(50, y, 230, y)
+            c.line(320, y, 500, y)
+            c.line(590, y, 770, y)
+            
+            y -= 15
+            c.setFont("Helvetica", 9)
+            c.drawString(50, y, "Signature over Printed Name / Date")
+            c.drawString(320, y, "Signature over Printed Name / Date")
+            c.drawString(590, y, "Signature over Printed Name / Date")
+
+            c.save()
+            
+            QMessageBox.information(self, "Success", f"Issuance log saved as PDF:\n{filename}")
+            
+            # Auto-open
+            try:
+                os.startfile(filename)
+            except AttributeError:
+                if sys.platform == 'darwin': os.system(f'open "{filename}"')
+                else: os.system(f'xdg-open "{filename}"')
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to generate PDF: {e}")
+
+    def batch_fulfill(self, action='DELIVER'):
+        """Processes multiple selected items at once."""
+        selected_rows = sorted(list(set(index.row() for index in self.table.selectedIndexes())))
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Please select one or more rows to process.")
+            return
+            
+        action_msg = "Deliver" if action == 'DELIVER' else "Undo"
+        ans = QMessageBox.question(self, f"Confirm Bulk {action_msg}", 
+                                 f"Are you sure you want to {action.lower()} {len(selected_rows)} selected items?",
                                  QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        
         if ans != QMessageBox.StandardButton.Yes: return
 
+        success_count = 0
+        skip_count = 0
+        errors = []
+        
         with SessionLocal() as session:
             try:
-                # Fresh re-fetch
-                db_ri = session.query(RequestItem).options(
-                    joinedload(RequestItem.supply_request),
-                    joinedload(RequestItem.item)
-                ).get(ri.id)
-                
-                if db_ri.supply_request.status == "FULFILLED":
-                    QMessageBox.warning(self, "Conflict", "This request was already fulfilled by someone else.")
-                    self.load_data()
-                    return
+                for row_idx in selected_rows:
+                    try:
+                        ri_id = int(self.table.item(row_idx, 7).text())
+                        db_ri = session.query(RequestItem).options(
+                            joinedload(RequestItem.supply_request),
+                            joinedload(RequestItem.item),
+                            joinedload(RequestItem.supply_request).joinedload(SupplyRequest.source_location)
+                        ).get(ri_id)
+                        
+                        if not db_ri: continue
+                        
+                        status_val = db_ri.supply_request.status or "PENDING"
+                        is_currently_fulfilled = status_val in ["FULFILLED", "DONE", "DELIVERED"]
+                        
+                        # Guard: Skip items that already match the target state
+                        if action == 'DELIVER' and is_currently_fulfilled:
+                            skip_count += 1
+                            continue
+                        if action == 'UNDO' and not is_currently_fulfilled:
+                            skip_count += 1
+                            continue
+                            
+                        # Logic
+                        if action == 'UNDO':
+                            src_id = db_ri.supply_request.source_location_id
+                            stock = session.query(Stock).filter_by(item_id=db_ri.item_id, location_id=src_id).first()
+                            if stock:
+                                stock.quantity += db_ri.quantity
+                            else:
+                                session.add(Stock(item_id=db_ri.item_id, location_id=src_id, quantity=db_ri.quantity))
+                            db_ri.supply_request.status = "PENDING"
+                            success_count += 1
+                        else: # DELIVER
+                            src_id = db_ri.supply_request.source_location_id
+                            stock = session.query(Stock).filter_by(item_id=db_ri.item_id, location_id=src_id).first()
+                            curr = stock.quantity if stock else 0.0
+                            
+                            if curr < db_ri.quantity:
+                                skip_count += 1
+                                errors.append(f"- {db_ri.item.name} for {db_ri.supply_request.employee.name} (Shortage: {db_ri.quantity - curr:.2f})")
+                                continue
+                                
+                            if stock:
+                                stock.quantity -= db_ri.quantity
+                            else:
+                                session.add(Stock(item_id=db_ri.item_id, location_id=src_id, quantity=-db_ri.quantity))
+                            db_ri.supply_request.status = "FULFILLED"
+                            success_count += 1
+                            
+                    except Exception as e:
+                        errors.append(f"Row {row_idx+1} Error: {str(e)}")
 
-                # Stock Safeguard
-                src_id = db_ri.supply_request.source_location_id
-                item_id = db_ri.item_id
-                stock = session.query(Stock).filter_by(item_id=item_id, location_id=src_id).first()
-                
-                curr = stock.quantity if stock else 0.0
-                if curr < db_ri.quantity:
-                    QMessageBox.warning(self, "Insufficient Stock", 
-                                       f"Unable to fulfill: {db_ri.item.name} has only {curr:.2f} units available at {db_ri.supply_request.source_location.name}.\n\n"
-                                       "Please restock before finalizing this delivery.")
-                    return
-
-                # Process
-                if stock:
-                    stock.quantity -= db_ri.quantity
-                else:
-                    # Defensive
-                    new_stock = Stock(item_id=item_id, location_id=src_id, quantity=-db_ri.quantity)
-                    session.add(new_stock)
-
-                db_ri.supply_request.status = "FULFILLED"
                 session.commit()
                 
-                QMessageBox.information(self, "Shipped", f"Status updated to FULFILLED. {db_ri.quantity} units deducted from inventory.")
+                summary = f"Processing Complete:\n- {success_count} items processed successfully."
+                if skip_count > 0:
+                    summary += f"\n- {skip_count} items skipped."
+                if errors:
+                    summary += "\n\nIssues encountered:\n" + "\n".join(errors[:10])
+                    if len(errors) > 10: summary += "\n...and more."
+                
+                QMessageBox.information(self, "Batch Summary", summary)
                 self.load_data()
                 if self.parent(): self.parent().refresh_table()
                 
             except Exception as e:
                 session.rollback()
-                QMessageBox.critical(self, "Error", f"Failed to fulfill: {str(e)}")
+                QMessageBox.critical(self, "Batch Error", f"Fatal error during batch processing: {str(e)}")
 
-class UsageCard(QFrame):
-    """A custom widget to visually display consumption stats for a single item."""
-    def __init__(self, item_name, avg_days, weekly, yearly, status, parent=None):
-        super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setStyleSheet("""
-            UsageCard {
-                background-color: #ffffff;
-                border: 1px solid #e0e0e0;
-                border-radius: 10px;
-                padding: 10px;
-                margin-bottom: 8px;
-            }
-            UsageCard:hover { border: 1px solid #1F4E78; background-color: #f0f7ff; }
-            QLabel#ItemTitle { font-weight: bold; font-size: 14px; color: #1F4E78; }
-            QLabel#StatLabel { color: #7f8c8d; font-size: 11px; text-transform: uppercase; }
-            QLabel#StatValue { font-weight: bold; font-size: 14px; color: #2c3e50; }
-        """)
-        
-        layout = QVBoxLayout(self)
-        
-        # Header: Name and Status
-        header = QHBoxLayout()
-        title = QLabel(item_name)
-        title.setObjectName("ItemTitle")
-        header.addWidget(title)
-        
-        status_lbl = QLabel(status)
-        color = "#e74c3c" if "High" in status else "#2ecc71" if "Normal" in status else "#3498db"
-        status_lbl.setStyleSheet(f"font-weight: bold; color: {color};")
-        header.addStretch()
-        header.addWidget(status_lbl)
-        layout.addLayout(header)
-        
-        # Speed Indicator (Progress Bar)
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(8)
-        
-        if avg_days:
-            val = max(0, min(100, int((30 - avg_days) / 30 * 100)))
-            self.progress.setValue(val)
-            color = "#e74c3c" if avg_days < 7 else "#3498db" if avg_days < 30 else "#2ecc71"
-            self.progress.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; border-radius: 4px; }}")
-        else:
-            self.progress.setValue(0)
-        layout.addWidget(self.progress)
-        
-        # Stats Grid
-        stats = QHBoxLayout()
-        def add_stat(label, value):
-            vbox = QVBoxLayout()
-            vbox.setSpacing(2)
-            l = QLabel(label); l.setObjectName("StatLabel")
-            v = QLabel(value); v.setObjectName("StatValue")
-            vbox.addWidget(l); vbox.addWidget(v)
-            stats.addLayout(vbox)
-        
-        add_stat("Avg Gap", f"{avg_days:.1f} Days" if avg_days else "N/A")
-        stats.addStretch()
-        add_stat("Weekly", weekly)
-        stats.addStretch()
-        add_stat("Yearly", yearly)
-        layout.addLayout(stats)
-
-class ConsumptionReportDialog(QDialog):
-    def __init__(self, mode="SATELLITE", parent=None):
-        super().__init__(parent)
-        self.mode = mode
-        title_text = "Total Requested Log" if mode == "MAIN_OFFICE" else "Supply Consumption & Usage Analysis"
-        self.setWindowTitle(title_text)
-        self.setMinimumSize(950, 700)
-        
-        self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(20, 20, 20, 20)
-        self.main_layout.setSpacing(15)
-        
-        title_box = QVBoxLayout()
-        header_text = "Total Requested Log" if mode == "MAIN_OFFICE" else "Supply Consumption Dashboard"
-        title = QLabel(header_text)
-        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #1F4E78;")
-        title_box.addWidget(title)
-        subtitle_text = "View detailed request history for office employees." if mode == "MAIN_OFFICE" else "Select an employee on the left to view their visual consumption analytics."
-        subtitle = QLabel(subtitle_text)
-        subtitle.setStyleSheet("color: #666; font-size: 13px;")
-        title_box.addWidget(subtitle)
-        self.main_layout.addLayout(title_box)
-
-        # Split Pane
-        self.split_pane = QHBoxLayout()
-        # LEFT: Employee Browser
-        left_panel = QVBoxLayout()
-        left_panel.addWidget(QLabel("<b>Browse Employees</b>"))
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search by name...")
-        self.search_input.textChanged.connect(self.filter_employees)
-        left_panel.addWidget(self.search_input)
-        self.emp_list = QListWidget()
-        self.emp_list.itemClicked.connect(self.on_employee_selected)
-        left_panel.addWidget(self.emp_list)
-        self.split_pane.addLayout(left_panel, 1)
-        
-        # RIGHT: Analytics Panel
-        right_panel = QVBoxLayout()
-        panel_header = "Detailed Request Log" if self.mode == "MAIN_OFFICE" else "Analytical Breakdown"
-        right_panel.addWidget(QLabel(f"<b>{panel_header}</b>"))
-        
-        if self.mode == "MAIN_OFFICE":
-            self.log_table = QTableWidget()
-            self.log_table.setColumnCount(3)
-            self.log_table.setHorizontalHeaderLabels(["Date", "Item Name", "Quantity"])
-            self.log_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-            self.log_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            right_panel.addWidget(self.log_table)
-        else:
-            self.scroll = QScrollArea()
-            self.scroll.setWidgetResizable(True)
-            self.dash_content = QWidget()
-            self.dash_content.setStyleSheet("background-color: #f4f7f9; border-radius: 10px;")
-            self.dash_layout = QVBoxLayout(self.dash_content)
-            self.dash_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-            self.placeholder = QLabel("\n\n\n\n\nSelect an employee to view details.")
-            self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.dash_layout.addWidget(self.placeholder)
-            self.scroll.setWidget(self.dash_content)
-            right_panel.addWidget(self.scroll)
-            
-        self.split_pane.addLayout(right_panel, 3)
-        self.main_layout.addLayout(self.split_pane)
-
-        # Bottom Actions
-        footer = QHBoxLayout()
-        self.print_btn = QPushButton("Export Current Summary to Excel")
-        self.print_btn.setEnabled(False) 
-        self.print_btn.clicked.connect(self.run_export)
-        footer.addStretch()
-        footer.addWidget(self.print_btn)
-        self.main_layout.addLayout(footer)
-
-        self.load_data_stats()
-
-    def load_data_stats(self):
-        def parse_freq(f_str):
-            if not f_str: return None
-            f_str = f_str.lower().strip()
-            num = "".join([c for c in f_str if c.isdigit() or c == '.'])
-            val = float(num) if num else 1.0
-            if "week" in f_str: return val * 7
-            if "month" in f_str: return val * 30
-            if "day" in f_str: return val
-            if "year" in f_str: return val * 365
-            if "defective" in f_str or "needed" in f_str: return 365.0
-            return None
-
-        def normalize_name(name):
-            n = name.upper()
-            if "REFILL" in n:
-                if "PEN" in n or "INK" in n: return "BALLPEN"
-                if "CORRECTION" in n: return "CORRECTION TAPE"
-                if "GLUE" in n: return "GLUE"
-            return name
-
+    def fulfill_item(self, ri):
+        """Unified toggle fulfillment logic with stock reversal support."""
         with SessionLocal() as session:
-            target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
-            
-            records = session.query(
-                Employee.name.label('emp'), Item.name.label('item'),
-                SupplyRequest.request_date.label('date'), RequestItem.frequency.label('freq'),
-                RequestItem.quantity.label('qty')
-            ).select_from(Employee).join(SupplyRequest).join(RequestItem).join(Item).join(
-                Location, SupplyRequest.dest_location_id == Location.id
-            ).filter(Location.name == target_loc_name).order_by(Employee.name, Item.name, SupplyRequest.request_date).all()
-            
-            groups = {}
-            for r in records:
-                item = normalize_name(r.item)
-                key = (r.emp, item)
-                if key not in groups: groups[key] = {"dates": [], "freqs": [], "qtys": []}
-                groups[key]["dates"].append(r.date)
-                groups[key]["qtys"].append(r.qty)
-                if r.freq: groups[key]["freqs"].append(r.freq)
-
-            self.all_data = {}
-            for (emp, item), info in groups.items():
-                if emp not in self.all_data: self.all_data[emp] = []
-                total = len(info["dates"])
-                
-                # For Main Office log, we want the raw list of requests
-                raw_history = []
-                for i in range(total):
-                    raw_history.append({
-                        "date": info["dates"][i].strftime("%Y-%m-%d"),
-                        "item": item,
-                        "qty": info["qtys"][i]
-                    })
-
-                days = None
-                if info["freqs"]: days = parse_freq(info["freqs"][-1])
-                if days is None and total > 1:
-                    d = info["dates"]
-                    gaps = [(d[i] - d[i-1]).days for i in range(1, len(d))]
-                    days = sum(gaps)/len(gaps)
-                
-                status = "Insufficient Data"
-                if days:
-                    if days < 7: status = "🔥 High Usage"
-                    elif days < 30: status = "✅ Normal"
-                    else: status = "🧊 Low Usage"
-                
-                self.all_data[emp].append({
-                    "item": item, "total": total, "days": days,
-                    "weekly": f"{(7.0/days):.2f}" if days else "N/A",
-                    "yearly": f"{(365.0/days):.1f}" if days else "N/A",
-                    "status": status,
-                    "raw": raw_history
-                })
-
-        self.emp_list.clear()
-        for emp in sorted(self.all_data.keys()):
-            self.emp_list.addItem(emp)
-
-    def filter_employees(self):
-        query = self.search_input.text().lower()
-        for i in range(self.emp_list.count()):
-            it = self.emp_list.item(i)
-            it.setHidden(query not in it.text().lower())
-
-    def on_employee_selected(self, item):
-        emp = item.text()
-        self.print_btn.setEnabled(True)
-        stats = self.all_data.get(emp, [])
-
-        if self.mode == "MAIN_OFFICE":
-            self.log_table.setRowCount(0)
-            # Combine all raw logs for this employee and sort by date
-            full_history = []
-            for s in stats:
-                full_history.extend(s.get("raw", []))
-            
-            full_history.sort(key=lambda x: x["date"], reverse=True)
-            
-            self.log_table.setRowCount(len(full_history))
-            for i, entry in enumerate(full_history):
-                self.log_table.setItem(i, 0, QTableWidgetItem(entry["date"]))
-                self.log_table.setItem(i, 1, QTableWidgetItem(entry["item"]))
-                self.log_table.setItem(i, 2, QTableWidgetItem(str(entry["qty"])))
-        else:
-            while self.dash_layout.count():
-                w = self.dash_layout.takeAt(0).widget()
-                if w: w.deleteLater()
-                
-            # Lifecycle Summary Header
-            with SessionLocal() as session:
-                first_req = session.query(SupplyRequest).filter_by(employee_id=session.query(Employee.id).filter_by(name=emp).scalar_subquery()).order_by(SupplyRequest.request_date.asc()).first()
-                tenure = "New User"
-                if first_req:
-                    days = (datetime.now() - first_req.request_date).days
-                    tenure = f"{days} days since first issuance" if days > 0 else "First issuance today"
-            
-            lbl = QLabel(f"Dashboard: {emp}")
-            lbl.setStyleSheet("font-size: 16px; font-weight: bold; margin-top: 10px; color: #1F4E78;")
-            self.dash_layout.addWidget(lbl)
-            
-            tenure_lbl = QLabel(f"<i>Life Cycle: {tenure}</i>")
-            tenure_lbl.setStyleSheet("color: #7f8c8d; margin-bottom: 10px;")
-            self.dash_layout.addWidget(tenure_lbl)
-            
-            for s in stats:
-                card = UsageCard(s["item"], s["days"], s["weekly"], s["yearly"], s["status"])
-                self.dash_layout.addWidget(card)
-            self.dash_layout.addStretch()
-
-    def run_export(self):
-        curr = self.emp_list.currentItem()
-        if not curr: return
-        emp = curr.text()
-        stats = self.all_data.get(emp, [])
-        rows = []
-        for s in stats:
-            rows.append((emp, s["item"], str(s["total"]), f"{s['days']:.1f}" if s["days"] else "N/A", s["weekly"], s["yearly"], s["status"]))
-        try:
-            filename = generate_consumption_report(rows)
-            QMessageBox.information(self, "Success", f"Report saved as {filename}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
-
-    def run_print_history(self):
-        """Generates a professional Excel report for this specific employee."""
-        with SessionLocal() as session:
-            # Query all items for this employee to get metadata (role, area, etc.)
-            requests = session.query(RequestItem).join(SupplyRequest).filter(
-                SupplyRequest.employee_id == self.employee_id
-            ).options(
-                joinedload(RequestItem.item),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.employee),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department)
-            ).order_by(RequestItem.id.desc()).all()
-
-            if not requests:
-                QMessageBox.warning(self, "No Data", "No history found for this employee.")
-                return
-
-            # Extract metadata from the most recent request
-            latest = requests[0]
-            role = latest.supply_request.department.role or ""
-            area = latest.supply_request.department.area_name or "Unknown"
-            shift = latest.supply_request.department.shift or ""
-            supervisor = latest.supply_request.department.supervisor or ""
-
-            # Format data for the generator
-            data_rows = []
-            for r in requests:
-                data_rows.append((
-                    r.supply_request.request_date.strftime("%Y-%m-%d"),
-                    r.item.name,
-                    r.quantity,
-                    r.frequency or ""
-                ))
-
             try:
-                filename = generate_populated_report(
-                    self.windowTitle().replace("Request History: ", ""),
-                    role, area, shift, supervisor, data_rows
-                )
-                QMessageBox.information(self, "Success", f"Professional report generated: {filename}")
+                # Fresh re-fetch
+                db_ri = session.query(RequestItem).options(
+                    joinedload(RequestItem.supply_request),
+                    joinedload(RequestItem.item),
+                    joinedload(RequestItem.supply_request).joinedload(SupplyRequest.source_location),
+                    joinedload(RequestItem.supply_request).joinedload(SupplyRequest.employee)
+                ).get(ri.id)
+                
+                status_val = db_ri.supply_request.status
+                is_undoing = status_val in ["FULFILLED", "DONE", "DELIVERED"]
+
+                if is_undoing:
+                    ans = QMessageBox.question(self, "Undo Delivery?", 
+                                             f"Restore '{db_ri.item.name}' for {db_ri.supply_request.employee.name} to PENDING?\n\n"
+                                             f"This will ADD {db_ri.quantity} units back to {db_ri.supply_request.source_location.name}.",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if ans != QMessageBox.StandardButton.Yes: return
+
+                    # Add stock back
+                    src_id = db_ri.supply_request.source_location_id
+                    stock = session.query(Stock).filter_by(item_id=db_ri.item_id, location_id=src_id).first()
+                    if stock:
+                        stock.quantity += db_ri.quantity
+                    else:
+                        new_stock = Stock(item_id=db_ri.item_id, location_id=src_id, quantity=db_ri.quantity)
+                        session.add(new_stock)
+                    
+                    db_ri.supply_request.status = "PENDING"
+                    msg = "Delivery undone. Stock restored."
+                else:
+                    ans = QMessageBox.question(self, "Confirm Delivery", 
+                                             f"Deliver {db_ri.quantity} {db_ri.item.name} to {db_ri.supply_request.employee.name}?\n"
+                                             f"Source: {db_ri.supply_request.source_location.name}",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if ans != QMessageBox.StandardButton.Yes: return
+
+                    # Stock Safeguard
+                    src_id = db_ri.supply_request.source_location_id
+                    item_id = db_ri.item_id
+                    stock = session.query(Stock).filter_by(item_id=item_id, location_id=src_id).first()
+                    
+                    curr = stock.quantity if stock else 0.0
+                    if curr < db_ri.quantity:
+                        QMessageBox.warning(self, "Insufficient Stock", 
+                                           f"Unable to fulfill: {db_ri.item.name} has only {curr:.2f} units available at {db_ri.supply_request.source_location.name}.\n\n"
+                                           "Please restock before finalizing this delivery.")
+                        return
+
+                    # Process
+                    if stock:
+                        stock.quantity -= db_ri.quantity
+                    else:
+                        new_stock = Stock(item_id=item_id, location_id=src_id, quantity=-db_ri.quantity)
+                        session.add(new_stock)
+
+                    db_ri.supply_request.status = "FULFILLED"
+                    msg = f"Status updated to FULFILLED. {db_ri.quantity} units deducted from inventory."
+
+                session.commit()
+                QMessageBox.information(self, "Success", msg)
+                self.load_data()
+                if self.parent(): self.parent().refresh_table()
+                
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to generate report:\n{str(e)}")
+                session.rollback()
+                QMessageBox.critical(self, "Error", f"Failed to process: {str(e)}")
+
+
 
     def edit_date(self):
         selected = self.table.selectedItems()
@@ -1552,6 +1493,8 @@ class RequestTrackingApp(QWidget):
         self.setGeometry(100, 100, 1000, 600)
         
         self.main_layout = QHBoxLayout(self)
+        self.main_layout.setContentsMargins(30, 25, 30, 25)
+        self.main_layout.setSpacing(30)
         
         self.setup_input_panel()
         self.setup_table_panel()
@@ -1618,7 +1561,7 @@ class RequestTrackingApp(QWidget):
 
         # Buttons
         self.submit_btn = QPushButton("&Submit Request")
-        self.submit_btn.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold; padding: 8px;")
+        self.submit_btn.setProperty("class", "primary")
         self.submit_btn.clicked.connect(self.submit_request)
         self.submit_btn.setDefault(True)
         
@@ -1647,14 +1590,30 @@ class RequestTrackingApp(QWidget):
         self.search_timer.setInterval(300)
         self.search_timer.timeout.connect(self.run_search)
         
-        # Filter Bar Layout        # Filters
-        top_filter_layout = QHBoxLayout()
-        self.search_bar = QLineEdit()
-        self.search_bar.setPlaceholderText("Search Employee Name or Role...")
-        self.search_bar.textChanged.connect(self.search_timer.start)
-        top_filter_layout.addWidget(self.search_bar)
+        # Filter Bar Layout
+        search_bar = QHBoxLayout()
+        search_bar.addWidget(QLabel("Search:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Find employee, item, or status...")
+        self.search_input.textChanged.connect(self.search_timer.start)
+        search_bar.addWidget(self.search_input)
         
-        self.table_panel.addLayout(top_filter_layout)
+        self.refresh_btn = QPushButton("🔄 Refresh")
+        self.refresh_btn.setProperty("class", "secondary")
+        self.refresh_btn.clicked.connect(self.refresh_table)
+        search_bar.addWidget(self.refresh_btn)
+
+        self.google_sync_btn = QPushButton("📥 Google Form Inbox")
+        self.google_sync_btn.setProperty("class", "primary")
+        self.google_sync_btn.clicked.connect(self.open_google_inbox)
+        search_bar.addWidget(self.google_sync_btn)
+        
+        self.pending_deliveries_btn = QPushButton("📋 Pending Deliveries / Issuance Log")
+        self.pending_deliveries_btn.setProperty("class", "secondary")
+        self.pending_deliveries_btn.clicked.connect(self.open_pending_deliveries)
+        search_bar.addWidget(self.pending_deliveries_btn)
+        
+        self.table_panel.addLayout(search_bar)
 
         bottom_filter_layout = QHBoxLayout()
         bottom_filter_layout.addWidget(QLabel("From:"))
@@ -1681,6 +1640,19 @@ class RequestTrackingApp(QWidget):
             bottom_filter_layout.addWidget(self.area_filter)
             
 
+        bottom_filter_layout.addWidget(QLabel("Item:"))
+        self.item_filter = QLineEdit()
+        self.item_filter.setPlaceholderText("Filter by specific item...")
+        self.item_filter.textChanged.connect(self.search_timer.start)
+        
+        # Setup Completer for Item Search
+        self.item_completer = QCompleter()
+        self.item_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.item_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.item_filter.setCompleter(self.item_completer)
+        
+        bottom_filter_layout.addWidget(self.item_filter)
+
         self.reset_btn = QPushButton("Reset Filter")
         self.reset_btn.clicked.connect(self.reset_filters)
         bottom_filter_layout.addWidget(self.reset_btn)
@@ -1693,7 +1665,6 @@ class RequestTrackingApp(QWidget):
         self.table_panel.addWidget(hint)
         
         self.status_lbl = QLabel("Ready")
-        self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 5px;")
         self.table_panel.addWidget(self.status_lbl)
         
         self.table = QTableWidget()
@@ -1704,35 +1675,31 @@ class RequestTrackingApp(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers) # Make read-only
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.cellDoubleClicked.connect(self.open_employee_details)
-        
-        self.export_btn = QPushButton("🖨️ Print/Export Filtered Report")
-        self.export_btn.clicked.connect(self.run_export)
-        self.export_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
-        
         
         self.table_panel.addWidget(self.table)
         
         # Button layout at bottom right
         btn_box = QHBoxLayout()
-        self.delete_emp_btn = QPushButton("Delete Selected Employee")
-        self.delete_emp_btn.clicked.connect(self.delete_selected_employee)
-        self.delete_emp_btn.setStyleSheet("color: #c0392b; font-weight: bold;")
         
+        self.bulk_fulfill_btn = QPushButton("📦 Fulfill Selected Employees")
+        self.bulk_fulfill_btn.setProperty("class", "primary")
+        self.bulk_fulfill_btn.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
+        self.bulk_fulfill_btn.clicked.connect(self.fulfill_selected_employees)
+        btn_box.addWidget(self.bulk_fulfill_btn)
+
+        self.bulk_undo_emp_btn = QPushButton("⏪ Undo Fulfillment for Selected")
+        self.bulk_undo_emp_btn.setStyleSheet("background-color: #ef6c00; color: white; font-weight: bold;")
+        self.bulk_undo_emp_btn.clicked.connect(self.undo_fulfill_selected_employees)
+        btn_box.addWidget(self.bulk_undo_emp_btn)
+        
+        self.delete_emp_btn = QPushButton("Delete Selected Employee")
+        self.delete_emp_btn.setProperty("class", "danger")
+        self.delete_emp_btn.clicked.connect(self.delete_selected_employee)
         btn_box.addWidget(self.delete_emp_btn)
         
-        self.record_log_btn = QPushButton("📖 Record Issuance Log")
-        self.record_log_btn.clicked.connect(self.run_issuance_log)
-        self.record_log_btn.setStyleSheet("background-color: #8e44ad; color: white; font-weight: bold;")
-        btn_box.addWidget(self.record_log_btn)
-
-        
-        self.google_inbox_btn = QPushButton("📥 Google Forms Inbox")
-        self.google_inbox_btn.clicked.connect(self.open_google_inbox)
-        self.google_inbox_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
-        btn_box.addWidget(self.google_inbox_btn)
-
-        btn_box.addWidget(self.export_btn)
+        btn_box.addStretch()
         self.table_panel.addLayout(btn_box)
         
         self.main_layout.addLayout(self.table_panel, 3) # 3 parts width
@@ -1772,7 +1739,7 @@ class RequestTrackingApp(QWidget):
             self.dest_loc_input.blockSignals(False)
             
             # Load item names with descriptions
-            items = session.query(Item.name, Item.description).all()
+            items = session.query(Item.id, Item.name, Item.description).all()
             for i in items:
                 display = f"{i.name} ({i.description})" if i.description else i.name
                 self.item_name_input.addItem(display, {"name": i.name, "description": i.description or ""})
@@ -1784,6 +1751,13 @@ class RequestTrackingApp(QWidget):
                 
                 # Load into filter dropdown too
                 self.area_filter.addItems([a[0] for a in distinct_areas if a[0]])
+
+            # Populate Item Completer for Request Section
+            completer_items = []
+            for i in items:
+                display = f"{i.name} ({i.description})" if i.description else i.name
+                completer_items.append(display)
+            self.item_completer.setModel(QStringListModel(completer_items))
 
             # Load employee names for autofill
             employees = session.query(Employee.name).order_by(Employee.name).all()
@@ -1929,14 +1903,19 @@ class RequestTrackingApp(QWidget):
             self.emp_name_input.blockSignals(False)
 
             # Reload items
-            items = session.query(Item.name, Item.description).all()
+            items = session.query(Item.id, Item.name, Item.description).all()
             self.item_name_input.blockSignals(True)
             self.item_name_input.clear()
+            completer_items = []
             for i in items:
                 display = f"{i.name} ({i.description})" if i.description else i.name
                 self.item_name_input.addItem(display, {"name": i.name, "description": i.description or ""})
+                completer_items.append(display)
             self.item_name_input.setCurrentText("")
             self.item_name_input.blockSignals(False)
+            
+            # Update Item Completer
+            self.item_completer.setModel(QStringListModel(completer_items))
             
             distinct_areas = session.query(Department.area_name).distinct().all()
             self.area_input.blockSignals(True)
@@ -1954,11 +1933,12 @@ class RequestTrackingApp(QWidget):
                 self.area_filter.blockSignals(False)
 
     def refresh_table(self):
-        """Loads a list of distinct employees and their request count matching the date, area, and shift filters."""
+        """Loads a list of distinct employees and their request count matching the date, area, item, and search filters."""
         self.table.setRowCount(0)
         
         # Get Filters (Conditional)
-        search_text = self.search_bar.text().lower().strip()
+        search_text = self.search_input.text().lower().strip()
+        item_search = self.item_filter.text().lower().strip()
         start_qdate = self.start_date_filter.date()
         end_qdate = self.end_date_filter.date()
         
@@ -1966,32 +1946,45 @@ class RequestTrackingApp(QWidget):
         end_dt = datetime(end_qdate.year(), end_qdate.month(), end_qdate.day(), 23, 59, 59)
         
         area_filter = None
-        shift_filter = None
-        
         if self.mode == "SATELLITE":
             area_filter = self.area_filter.currentText()
 
         with SessionLocal() as session:
-            # We need to find the latest info for every employee
-            # This is complex in one query, so we'll fetch base stats and then enrich
+            # Main query for employees
             query = session.query(
                 Employee.id,
                 Employee.name,
-                Employee.role,
-                func.max(SupplyRequest.request_date).label('last_date')
+                Employee.role
             ).outerjoin(SupplyRequest, Employee.id == SupplyRequest.employee_id) \
-             .outerjoin(Department, SupplyRequest.department_id == Department.id)
+             .outerjoin(Department, SupplyRequest.department_id == Department.id) \
+             .outerjoin(RequestItem, SupplyRequest.id == RequestItem.request_id) \
+             .outerjoin(Item, RequestItem.item_id == Item.id)
             
-            if search_text:
-                query = query.filter((Employee.name.ilike(f"%{search_text}%")) | (Employee.role.ilike(f"%{search_text}%")))
+            # Apply Item Search if provided
+            if item_search:
+                query = query.filter(
+                    (Item.name.ilike(f"%{item_search}%")) | 
+                    (Item.description.ilike(f"%{item_search}%")) |
+                    ((Item.name + " (" + func.coalesce(Item.description, "") + ")").ilike(f"%{item_search}%"))
+                )
 
-            # Global Search Override: If there's text in the search bar, ignore the Area filter
-            # This makes it easier to find employees regardless of the current dropdown state.
+            # Apply Main Search (Employee Name or Role)
+            if search_text:
+                query = query.filter(
+                    (Employee.name.ilike(f"%{search_text}%")) | 
+                    (Employee.role.ilike(f"%{search_text}%"))
+                )
+
+            # Global Search Override: If there's no search text, respect Area filter
             if not search_text and area_filter and area_filter != "ALL":
                 query = query.filter(Department.area_name == area_filter)
 
-            # Filtering by date range (only if they have requests)
-            # Actually, standard view should show all employees, but count requests in range
+            # Date Range Filter (only for requests in this period)
+            query = query.filter(
+                (SupplyRequest.request_date >= start_dt) & 
+                (SupplyRequest.request_date <= end_dt)
+            )
+
             employees = query.group_by(Employee.id).order_by(Employee.name).all()
 
             row_idx = 0
@@ -2005,44 +1998,47 @@ class RequestTrackingApp(QWidget):
                 ).filter_by(employee_id=emp.id).order_by(SupplyRequest.request_date.desc()).first()
                 
                 # Office View Isolation Filter:
-                # 1. Show everything in UNIFIED mode
-                if self.mode == "UNIFIED":
-                    pass
-                # 2. If no requests, show everywhere
-                elif not latest_req:
-                    pass
-                # 3. If requests exist, filter by the latest one's destination
-                elif latest_req.dest_location:
+                if self.mode != "UNIFIED" and latest_req and latest_req.dest_location:
                     if latest_req.dest_location.name != target_loc_name:
                         continue
 
-                area_name = latest_req.department.area_name if latest_req and latest_req.department else "N/A"
-                shift_val = latest_req.department.shift if latest_req and latest_req.department else "N/A"
-                
-                # Fetch count of ALL requests in the period
-                total_in_period = session.query(func.count(SupplyRequest.id)).filter(
+                # Fetch count of ALL requests in the period (respecting item search)
+                count_query = session.query(func.count(SupplyRequest.id)).join(RequestItem).join(Item).filter(
                     SupplyRequest.employee_id == emp.id,
                     SupplyRequest.request_date >= start_dt,
                     SupplyRequest.request_date <= end_dt
-                ).scalar() or 0
+                )
+                if item_search:
+                    count_query = count_query.filter(
+                        (Item.name.ilike(f"%{item_search}%")) | 
+                        (Item.description.ilike(f"%{item_search}%")) |
+                        ((Item.name + " (" + func.coalesce(Item.description, "") + ")").ilike(f"%{item_search}%"))
+                    )
                 
-                # If the employee has 0 requests in the date range, completely skip them
+                total_in_period = count_query.scalar() or 0
                 if total_in_period == 0:
                     continue
                 
-                # 2. Determine "Pending" status based on explicit database column
+                # Insert row
                 self.table.insertRow(row_idx)
                 self.table.setItem(row_idx, 0, QTableWidgetItem(str(emp.id)))
                 self.table.setItem(row_idx, 1, QTableWidgetItem(emp.name))
                 
-                # Fetch count of fulfilled requests for No. of issuance
-                issuance_count = session.query(func.count(SupplyRequest.id)).filter(
+                # Fetch count of fulfilled requests for No. of issuance (respecting item search)
+                iss_query = session.query(func.count(SupplyRequest.id)).join(RequestItem).join(Item).filter(
                     SupplyRequest.employee_id == emp.id,
                     SupplyRequest.status.in_(["FULFILLED", "DONE", "DELIVERED"]),
                     SupplyRequest.request_date >= start_dt,
                     SupplyRequest.request_date <= end_dt
-                ).scalar() or 0
+                )
+                if item_search:
+                    iss_query = iss_query.filter(
+                        (Item.name.ilike(f"%{item_search}%")) | 
+                        (Item.description.ilike(f"%{item_search}%")) |
+                        ((Item.name + " (" + func.coalesce(Item.description, "") + ")").ilike(f"%{item_search}%"))
+                    )
                 
+                issuance_count = iss_query.scalar() or 0
                 self.table.setItem(row_idx, 2, QTableWidgetItem(str(issuance_count)))
                 
                 row_idx += 1
@@ -2054,9 +2050,12 @@ class RequestTrackingApp(QWidget):
 
     def reset_filters(self):
         """Reset search and date filters to defaults."""
-        self.search_bar.clear()
+        self.search_input.clear()
         self.start_date_filter.setDate(QDate.currentDate().addYears(-1))
         self.end_date_filter.setDate(QDate.currentDate())
+        if self.mode == "SATELLITE":
+            self.area_filter.setCurrentIndex(0)
+        self.item_filter.clear()
         self.refresh_table()
 
     def open_employee_details(self, row, column):
@@ -2078,6 +2077,165 @@ class RequestTrackingApp(QWidget):
         dialog = GoogleSyncInboxDialog(mode=self.mode, parent=self)
         dialog.exec()
         self.refresh_table()
+
+    def fulfill_selected_employees(self):
+        """Finds all PENDING requests for selected employees matching current filters and fulfills them if stock is available."""
+        selected_rows = sorted(list(set(index.row() for index in self.table.selectedIndexes())))
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Please select one or more employees.")
+            return
+            
+        emp_ids = []
+        for row in selected_rows:
+            emp_ids.append(int(self.table.item(row, 0).text()))
+            
+        # Capture current filters to restrict fulfillment to what the user actually sees
+        item_search = self.item_filter.text().lower().strip()
+        start_qdate = self.start_date_filter.date()
+        end_qdate = self.end_date_filter.date()
+        start_dt = datetime(start_qdate.year(), start_qdate.month(), start_qdate.day(), 0, 0, 0)
+        end_dt = datetime(end_qdate.year(), end_qdate.month(), end_qdate.day(), 23, 59, 59)
+            
+        ans = QMessageBox.question(self, "Bulk Fulfillment", 
+                                 f"Attempt to fulfill pending requests for {len(emp_ids)} selected employees\n(matching your current date/item filters)?",
+                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes: return
+
+        processed_count = 0
+        skip_count = 0
+        errors = []
+        
+        target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
+        
+        with SessionLocal() as session:
+            try:
+                # Find all PENDING request items for these employees destined for this office AND matching filters
+                query = session.query(RequestItem).join(SupplyRequest).join(Location, SupplyRequest.dest_location_id == Location.id).join(Item).filter(
+                    SupplyRequest.employee_id.in_(emp_ids),
+                    SupplyRequest.status.in_([None, "PENDING"]),
+                    Location.name == target_loc_name,
+                    SupplyRequest.request_date >= start_dt,
+                    SupplyRequest.request_date <= end_dt
+                )
+                
+                if item_search:
+                    query = query.filter(
+                        (Item.name.ilike(f"%{item_search}%")) | 
+                        (Item.description.ilike(f"%{item_search}%")) |
+                        ((Item.name + " (" + func.coalesce(Item.description, "") + ")").ilike(f"%{item_search}%"))
+                    )
+                    
+                items_to_process = query.all()
+                
+                if not items_to_process:
+                    QMessageBox.information(self, "No Pending Work", "No pending requests found for the selected employees.")
+                    return
+
+                for ri in items_to_process:
+                    src_id = ri.supply_request.source_location_id
+                    stock = session.query(Stock).filter_by(item_id=ri.item_id, location_id=src_id).first()
+                    curr = stock.quantity if stock else 0.0
+                    
+                    if curr < ri.quantity:
+                        skip_count += 1
+                        errors.append(f"- {ri.item.name} for {ri.supply_request.employee.name} (Shortage: {ri.quantity - curr:.2f})")
+                        continue
+                        
+                    if stock:
+                        stock.quantity -= ri.quantity
+                    else:
+                        session.add(Stock(item_id=ri.item_id, location_id=src_id, quantity=-ri.quantity))
+                    
+                    ri.supply_request.status = "FULFILLED"
+                    processed_count += 1
+                
+                session.commit()
+                
+                summary = f"Bulk Fulfillment Results:\n- {processed_count} requests fulfilled."
+                if skip_count > 0:
+                    summary += f"\n- {skip_count} requests skipped due to stock/errors."
+                if errors:
+                    summary += "\n\nStock Conflicts:\n" + "\n".join(errors[:10])
+                    if len(errors) > 10: summary += "\n...and more."
+                
+                QMessageBox.information(self, "Bulk Fulfillment Summary", summary)
+                self.refresh_table()
+                
+            except Exception as e:
+                session.rollback()
+                QMessageBox.critical(self, "Error", f"Failed to perform bulk fulfillment: {str(e)}")
+
+    def undo_fulfill_selected_employees(self):
+        """Finds all FULFILLED/DONE requests for selected employees matching current filters and reverts them to PENDING, restoring stock."""
+        selected_rows = sorted(list(set(index.row() for index in self.table.selectedIndexes())))
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Please select one or more employees.")
+            return
+            
+        emp_ids = []
+        for row in selected_rows:
+            emp_ids.append(int(self.table.item(row, 0).text()))
+            
+        item_search = self.item_filter.text().lower().strip()
+        start_qdate = self.start_date_filter.date()
+        end_qdate = self.end_date_filter.date()
+        start_dt = datetime(start_qdate.year(), start_qdate.month(), start_qdate.day(), 0, 0, 0)
+        end_dt = datetime(end_qdate.year(), end_qdate.month(), end_qdate.day(), 23, 59, 59)
+            
+        ans = QMessageBox.question(self, "Bulk Undo Fulfillment", 
+                                 f"Revert fulfilled requests for {len(emp_ids)} selected employees\n(matching your current date/item filters) to PENDING?\nStock will be restored.",
+                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ans != QMessageBox.StandardButton.Yes: return
+
+        processed_count = 0
+        skip_count = 0
+        
+        target_loc_name = "MAIN OFFICE" if self.mode == "MAIN_OFFICE" else "SATELLITE OFFICE"
+        
+        with SessionLocal() as session:
+            try:
+                # Find all FULFILLED/DONE/DELIVERED request items for these employees destined for this office AND matching filters
+                query = session.query(RequestItem).join(SupplyRequest).join(Location, SupplyRequest.dest_location_id == Location.id).join(Item).filter(
+                    SupplyRequest.employee_id.in_(emp_ids),
+                    SupplyRequest.status.in_(["FULFILLED", "DONE", "DELIVERED"]),
+                    Location.name == target_loc_name,
+                    SupplyRequest.request_date >= start_dt,
+                    SupplyRequest.request_date <= end_dt
+                )
+                
+                if item_search:
+                    query = query.filter(
+                        (Item.name.ilike(f"%{item_search}%")) | 
+                        (Item.description.ilike(f"%{item_search}%")) |
+                        ((Item.name + " (" + func.coalesce(Item.description, "") + ")").ilike(f"%{item_search}%"))
+                    )
+                    
+                items_to_undo = query.all()
+                
+                if not items_to_undo:
+                    QMessageBox.information(self, "No Work Found", "No fulfilled requests found for the selected employees.")
+                    return
+
+                for ri in items_to_undo:
+                    # Restore Stock
+                    src_id = ri.supply_request.source_location_id
+                    stock = session.query(Stock).filter_by(item_id=ri.item_id, location_id=src_id).first()
+                    if stock:
+                        stock.quantity += ri.quantity
+                    else:
+                        session.add(Stock(item_id=ri.item_id, location_id=src_id, quantity=ri.quantity))
+                    
+                    ri.supply_request.status = "PENDING"
+                    processed_count += 1
+                
+                session.commit()
+                
+                QMessageBox.information(self, "Bulk Undo Summary", f"Successfully reverted {processed_count} fulfillments and restored stock.")
+                self.refresh_table()
+                
+            except Exception as e:
+                session.rollback()
+                QMessageBox.critical(self, "Error", f"Failed to perform bulk undo: {str(e)}")
 
     def delete_selected_employee(self):
         """Removes selected employees and all their history after bulk confirmation."""
@@ -2137,7 +2295,7 @@ class RequestTrackingApp(QWidget):
 
     def filter_table(self):
         """Hides or shows rows based on search text."""
-        search_text = self.search_bar.text().lower().strip()
+        search_text = self.search_input.text().lower().strip()
         visible_count = 0
         for row in range(self.table.rowCount()):
             match = False
@@ -2157,83 +2315,9 @@ class RequestTrackingApp(QWidget):
         # UX: Update status label
         if visible_count == 0:
             self.status_lbl.setText("No employees found matching your search/filters.")
-            self.status_lbl.setStyleSheet("color: #c0392b; font-weight: bold; font-size: 11px; margin-bottom: 5px;")
         else:
             self.status_lbl.setText(f"Showing {visible_count} employees with issuance history")
-            self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 5px;")
 
-    def run_export(self):
-        try:
-            # Get current filter values
-            start_qdate = self.start_date_filter.date()
-            end_qdate = self.end_date_filter.date()
-            start_dt = datetime(start_qdate.year(), start_qdate.month(), start_qdate.day())
-            end_dt = datetime(end_qdate.year(), end_qdate.month(), end_qdate.day(), 23, 59, 59)
-            
-            area = None
-            
-            if self.mode == "SATELLITE":
-                area = self.area_filter.currentText()
-                if area == "ALL": area = None
-
-            exported_path = export_to_excel(
-                start_date=start_dt,
-                end_date=end_dt,
-                area=area,
-                only_pending=False
-            )
-            
-            if exported_path:
-                QMessageBox.information(self, "Export Successful", f"Filtered report successfully exported to:\n{exported_path}")
-            else:
-                QMessageBox.warning(self, "No Data", "No matching records found for the current filters.")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Failed", f"Failed to export data:\n{str(e)}")
-
-    def run_issuance_log(self):
-        """Generates an HTML report of all FULFILLED requests (Record issuance log)."""
-        from core.html_generator import generate_html_report
-        import os
-        
-        with SessionLocal() as session:
-            # Query all fulfilled requests
-            fulfilled_items = session.query(RequestItem).join(SupplyRequest).filter(
-                SupplyRequest.status.in_(["FULFILLED", "DONE", "DELIVERED"])
-            ).options(
-                joinedload(RequestItem.item),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.employee),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.department),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.source_location),
-                joinedload(RequestItem.supply_request).joinedload(SupplyRequest.dest_location)
-            ).order_by(SupplyRequest.request_date.desc()).all()
-            
-            if not fulfilled_items:
-                QMessageBox.information(self, "No Data", "No fulfilled requests found to generate an issuance log.")
-                return
-                
-            data_rows = []
-            for ri in fulfilled_items:
-                date_str = ri.supply_request.request_date.strftime("%Y-%m-%d")
-                emp_name = ri.supply_request.employee.name if ri.supply_request.employee else "N/A"
-                area = ri.supply_request.department.area_name if ri.supply_request.department else "N/A"
-                item_name = ri.item.name
-                qty = ri.quantity
-                freq = ri.frequency or ""
-                dest = ri.supply_request.dest_location.name if ri.supply_request.dest_location else "N/A"
-                
-                data_rows.append((date_str, emp_name, area, item_name, qty, freq, dest))
-                
-            headers = ["Date", "Employee Name", "Department Area", "Item Name", "Quantity", "Remarks/Frequency", "Destination Location"]
-            
-            fname = f"RECORD_ISSUANCE_LOG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-            
-            try:
-                # Add alphabetical sorting for standard
-                data_rows.sort(key=lambda x: str(x[3]).lower())
-                filename = generate_html_report("📖 Official Record Issuance Log", headers, data_rows, fname)
-                os.startfile(filename)
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to generate issuance log: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

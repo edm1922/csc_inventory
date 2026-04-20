@@ -70,12 +70,36 @@ def export_to_excel(start_date=None, end_date=None, area=None, shift=None, only_
         filename = f"FILTERED_REPORT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
         with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name="Supply Report", index=False)
+            df.to_excel(writer, sheet_name="Supply Report", index=False, startrow=6)
             worksheet = writer.sheets["Supply Report"]
-            for idx, col in enumerate(df):
-                series = df[col]
-                max_len = max(series.astype(str).map(len).max(), len(str(series.name))) + 2
-                worksheet.column_dimensions[chr(65 + idx)].width = max_len
+            
+            # Import newly created styler
+            from core.excel_generator import apply_centro_header
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            
+            apply_centro_header(worksheet, "SUPPLY HISTORY REPORT", len(df.columns))
+            
+            # Styling for table headers
+            table_header_font = Font(bold=True, color="FFFFFF")
+            table_header_fill = PatternFill(start_color="2980B9", end_color="2980B9", fill_type="solid")
+            thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+            for cell in worksheet[7]:
+                cell.font = table_header_font
+                cell.fill = table_header_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            
+            # Column widths and cell borders for data
+            from openpyxl.utils import get_column_letter
+            for col_idx, column_cells in enumerate(worksheet.columns, 1):
+                data_cells = [c for c in column_cells if hasattr(c, 'row') and c.row >= 7 and hasattr(c, 'value') and c.value is not None]
+                if data_cells:
+                    max_len = max(len(str(c.value)) for c in data_cells)
+                    worksheet.column_dimensions[get_column_letter(col_idx)].width = max_len + 5
+                
+                for cell in column_cells:
+                    if hasattr(cell, 'row') and cell.row >= 7:
+                        cell.border = thin_border
 
         return filename
 
@@ -102,8 +126,12 @@ def generate_inventory_checklist(data_rows, location_name="ALL"):
     
     # Define columns: Added "Checked" column for manual checking
     headers = ["Item Name", "Current Stock", "Unit", "Location", "Threshold", "Checked [ ]"]
+    
+    from core.excel_generator import apply_centro_header
+    apply_centro_header(ws, "INVENTORY CHECKLIST", len(headers))
+    
     for col_num, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_num)
+        cell = ws.cell(row=7, column=col_num)
         cell.value = header
         cell.font = header_font
         cell.fill = header_fill
@@ -119,7 +147,8 @@ def generate_inventory_checklist(data_rows, location_name="ALL"):
     ws.column_dimensions['F'].width = 15 # Checked column
     
     # Populate Data
-    for row_idx, data in enumerate(data_rows, 2):
+    for base_idx, data in enumerate(data_rows):
+        row_idx = base_idx + 8
         ws.cell(row=row_idx, column=1, value=data.get("Item")).border = thick_border
         ws.cell(row=row_idx, column=2, value=data.get("Actual")).border = thick_border
         ws.cell(row=row_idx, column=3, value=data.get("Unit")).border = thick_border

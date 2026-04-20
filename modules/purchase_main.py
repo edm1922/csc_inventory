@@ -73,7 +73,7 @@ class PurchaseRequestDialog(QDialog):
         tool_layout.addStretch()
         
         self.total_label = QLabel("Estimated Total: Php. 0.00")
-        self.total_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #1F4E78;")
+        self.total_label.setStyleSheet("font-size: 18px; font-weight: 800; color: #1E3A5F; background: transparent;")
         tool_layout.addWidget(self.total_label)
         self.main_layout.addLayout(tool_layout)
         
@@ -93,7 +93,7 @@ class PurchaseRequestDialog(QDialog):
         # Action Buttons
         btns = QHBoxLayout()
         self.save_btn = QPushButton("&Save Request")
-        self.save_btn.setStyleSheet("background-color: #27ae60; color: white; padding: 10px; font-weight: bold;")
+        self.save_btn.setProperty("class", "primary")
         self.save_btn.clicked.connect(self.accept)
         self.save_btn.setDefault(True)
         
@@ -247,25 +247,29 @@ class PurchaseRequestDialog(QDialog):
 class PurchaseManager(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
+        # Set layout margins
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(30, 25, 30, 25)
+        self.main_layout.setSpacing(20)
         
         header = QLabel("Purchase Request Management")
-        header.setStyleSheet("font-size: 20px; font-weight: bold; color: #1F4E78; margin-bottom: 2px;")
-        layout.addWidget(header)
+        header.setObjectName("headerTitle")
+        self.main_layout.addWidget(header)
         
         self.status_lbl = QLabel("Ready")
-        self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
-        layout.addWidget(self.status_lbl)
+        self.main_layout.addWidget(self.status_lbl)
         
         btns = QHBoxLayout()
         self.create_btn = QPushButton("+ New Purchase Request")
-        self.create_btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        self.create_btn.setProperty("class", "primary")
         self.create_btn.clicked.connect(self.create_pr)
         
         self.export_btn = QPushButton("📋 Export to Excel (Print)")
+        self.export_btn.setProperty("class", "secondary")
         self.export_btn.clicked.connect(self.export_pr)
         
         self.delete_btn = QPushButton("🗑 Delete")
+        self.delete_btn.setProperty("class", "danger")
         self.delete_btn.clicked.connect(self.delete_pr)
         
         # Search Debounce Timer
@@ -285,7 +289,7 @@ class PurchaseManager(QWidget):
         btns.addStretch()
         btns.addWidget(QLabel("Search:"))
         btns.addWidget(self.search_input)
-        layout.addLayout(btns)
+        self.main_layout.addLayout(btns)
         
         self.table = QTableWidget()
         self.table.setColumnCount(6)
@@ -294,7 +298,7 @@ class PurchaseManager(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.cellDoubleClicked.connect(self.edit_pr)
-        layout.addWidget(self.table)
+        self.main_layout.addWidget(self.table)
         
         self.load_data()
 
@@ -314,10 +318,8 @@ class PurchaseManager(QWidget):
             # UX: Update status label
             if len(prs) == 0:
                 self.status_lbl.setText("No purchase requests found matching your search.")
-                self.status_lbl.setStyleSheet("color: #c0392b; font-weight: bold; font-size: 11px; margin-bottom: 10px;")
             else:
                 self.status_lbl.setText(f"Showing {len(prs)} purchase requests")
-                self.status_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px; margin-bottom: 10px;")
             for i, pr in enumerate(prs):
                 total_amt = sum(item.total for item in pr.items)
                 self.table.setItem(i, 0, QTableWidgetItem(pr.request_date.strftime("%Y-%m-%d")))

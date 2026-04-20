@@ -138,9 +138,9 @@ def generate_html_report(report_title, table_headers, table_data, filename="repo
             text-transform: uppercase;
         }}
         
-        .status-low {{ background-color: #fff3cd; color: #856404; }}
-        .status-restock {{ background-color: #f8d7da; color: #721c24; }}
-        .status-healthy {{ background-color: #d4edda; color: #155724; }}
+        .status-low {{ background-color: #ffe0b2; color: #e65100; }}
+        .status-restock, .status-pending {{ background-color: #f8d7da; color: #721c24; }}
+        .status-healthy, .status-fulfilled {{ background-color: #d4edda; color: #155724; }}
         
         .signature-section {{
             margin-top: 60px;
@@ -236,8 +236,8 @@ def _generate_rows(data, status_col_idx):
                 status_class = ""
                 status_val = str(val).upper()
                 if "LOW" in status_val: status_class = "status-low"
-                elif "RESTOCK" in status_val: status_class = "status-restock"
-                elif any(x in status_val for x in ["HEALTHY", "OK", "SUFFICIENT"]): status_class = "status-healthy"
+                elif any(x in status_val for x in ["RESTOCK", "PENDING"]): status_class = "status-pending"
+                elif any(x in status_val for x in ["HEALTHY", "OK", "SUFFICIENT", "FULFILLED", "DONE", "DELIVERED"]): status_class = "status-fulfilled"
                 
                 tr += f'<td><span class="status-badge {status_class}">{val}</span></td>'
             else:

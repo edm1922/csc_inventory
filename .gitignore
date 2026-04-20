@@ -3,13 +3,45 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Excel Reports and Temporary Files
+# PyInstaller / Build
+build/
+dist/
+dist2/
+*.spec
+
+# Database
+*.db
+data/*.db
+
+# Generated Reports and Temporary Files
 *.json
 ~$*
 *.log
+*.xlsx
+*.html
+*.pdf
+*.docx
+verify_*.py
+sample.xlsx
+RECORD_ISSUANCE_LOG_*
+STOCK_IN_*.pdf
+STOCK_IN_*.docx
+STOCK_OUT_*.pdf
+STOCK_OUT_*.docx
+PENDING_DEMAND_*
+PENDING_REQUESTS_*
+ITEM_REQUEST_HISTORY_*
+HIGH_FREQUENCY_ITEMS_*
+FILTERED_REPORT_*
+ISSUANCE_LOG_*
 
 # Environments
 .venv/
 env/
 venv/
 ENV/
+.env
+
+# Others
+archive/
+Calculator release/
